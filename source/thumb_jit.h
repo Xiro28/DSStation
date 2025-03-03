@@ -1,0 +1,429 @@
+template<int PROCNUM> 
+void emitThumbOP(opcode& op){
+    switch(op._op) {
+        case OP_ITP:
+        {
+           if (flag_dirty) store_flags();
+
+           flag_dirty = false;
+
+
+            regman.flush_all();
+            regman.reset();  
+
+            emit_jal(thumb_instructions_set[op.rs1 >> 6]);
+
+            emit_movi(psp_a0,op.rs1&0xFFFF); 
+
+            load_flags();
+
+            intr_instr++;
+        }
+        break;
+
+        case OP_LSR_0:
+        {
+            //printf("0x%x\n", emit_getCurrAdr());
+            /*psp_gpr_t dst = reg_alloc.getReg(op.rd, psp_v0, false);
+            psp_gpr_t rs1 = reg_alloc.getReg(op.rs1, psp_a0);
+
+            if (dst == psp_v0) storeReg(psp_zero, op.rd); else emit_move(dst, psp_zero);
+
+            emit_sra(psp_v0, rs1, 31);
+            emit_sll(psp_v0, psp_v0, 2);
+            emit_ori(psp_gp, psp_gp, 2);
+            emit_ins(psp_gp, psp_v0, _flag_C8, 3);
+
+            flag_dirty = true;*/
+        }
+        break;
+
+        //TODO ADD reg_alloc.end at the end of the opcde to store the temp reg (in case the static one are full)
+        case OP_AND:
+        {
+            int32_t regs[3] = {op.rd, op.rs1, op.rs2};
+
+            regman.get(3, regs);
+
+            const psp_gpr_t dst = (psp_gpr_t)regs[0]; 
+            const psp_gpr_t rs1 = (psp_gpr_t)regs[1]; 
+            const psp_gpr_t rs2 = (psp_gpr_t)regs[2]; 
+
+            emit_and(dst, rs1, rs2);
+
+            if (op.saveN){
+                emit_srl(psp_t0, dst, 31);
+                emit_ins(psp_gp, psp_t0, _flag_N8, _flag_N8);
+            }
+
+            if (op.saveZ){
+                emit_sltiu(psp_t0, dst, 1);
+                emit_ins(psp_gp, psp_t0, _flag_Z8, _flag_Z8);
+            }
+
+            regman.mark_dirty(dst);
+
+            flag_dirty = true;                  
+        }
+        break; 
+
+        //TODO! check flag for sub/cmp - not all cases are correct!!!! for now seems to work but this must be 
+        //                           one of the first thing to be analyzed if some games behaves wrongly!!
+        case OP_SUB:
+        { 
+            int32_t regs[3] = {op.rd, op.rs1, op.rs2};
+
+            regman.get(3, regs);
+            const psp_gpr_t dst = (psp_gpr_t)regs[0]; 
+            const psp_gpr_t rs1 = (psp_gpr_t)regs[1]; 
+            const psp_gpr_t rs2 = (psp_gpr_t)regs[2]; 
+
+            if (op.preOpType == PRE_OP_IMM){
+                emit_subiu(dst, rs1, op.imm);
+            }else{
+                emit_subu(dst, rs1, rs2);
+            }
+
+            if (!(op.extra_flags & EXTFL_NOFLAGS)){
+                if (op.saveN){
+                    emit_srl(psp_t0, dst, 31);
+                    emit_ins(psp_gp, psp_t0, _flag_N8, _flag_N8);
+                }
+
+                if (op.saveZ){
+                    emit_sltiu(psp_t0, dst, 1);
+                    emit_ins(psp_gp, psp_t0, _flag_Z8, _flag_Z8);
+                }
+
+                if (op.saveC){
+                    emit_sltu(psp_t0, rs1, rs2);
+                    emit_xori(psp_t0, psp_t0, 1);
+                    emit_ins(psp_gp, psp_t0, _flag_C8, _flag_C8);
+                }
+
+                if (op.saveV){
+                    emit_srl(psp_t1, dst, 31);
+                    emit_sltu(psp_t0, rs1, rs2);
+                    emit_xor(psp_t0, psp_t0, psp_t1);
+                    emit_ins(psp_gp, psp_t0, _flag_V8, _flag_V8);
+                }
+            }
+
+            regman.mark_dirty(dst);
+
+            flag_dirty = true;
+        }
+        break;
+
+        case OP_ADD:
+        {
+            int32_t regs[3] = {op.rd, op.rs1, op.rs2};
+
+            regman.get(3, regs);
+            const psp_gpr_t dst = (psp_gpr_t)regs[0]; 
+            const psp_gpr_t rs1 = (psp_gpr_t)regs[1]; 
+            const psp_gpr_t rs2 = (psp_gpr_t)regs[2]; 
+
+            if (op.preOpType == PRE_OP_IMM){
+                emit_addiu(dst, rs1, op.imm);
+            }else{
+                emit_addu(dst, rs1, rs2);
+            }
+
+            if (!(op.extra_flags & EXTFL_NOFLAGS)){
+                
+                if (op.saveN){
+                    emit_srl(psp_t0, dst, 31);
+                    emit_ins(psp_gp, psp_t0, _flag_N8, _flag_N8);
+                }
+
+                if (op.saveZ){
+                    emit_sltiu(psp_t0, dst, 1);
+                    emit_ins(psp_gp, psp_t0, _flag_Z8, _flag_Z8);
+                }
+            }
+
+            regman.mark_dirty(dst);
+            flag_dirty = true;
+        }
+        break;
+
+        case OP_EOR:
+        {
+            int32_t regs[3] = {op.rd, op.rs1, op.rs2};
+
+            regman.get(3, regs);
+
+            const psp_gpr_t dst = (psp_gpr_t)regs[0]; 
+            const psp_gpr_t rs1 = (psp_gpr_t)regs[1]; 
+            const psp_gpr_t rs2 = (psp_gpr_t)regs[2]; 
+
+            emit_xor(dst, rs1, rs2);
+            
+            if (op.saveN){
+                emit_srl(psp_t0, dst, 31);
+                emit_ins(psp_gp, psp_t0, _flag_N8, _flag_N8);
+            }
+
+            if (op.saveZ){
+                emit_sltiu(psp_t0, dst, 1);
+                emit_ins(psp_gp, psp_t0, _flag_Z8, _flag_Z8);
+            }
+
+            regman.mark_dirty(dst); 
+
+            flag_dirty = true;          
+        }
+        break;
+
+        case OP_ORR:
+        {
+            int32_t regs[3] = {op.rd, op.rs1, op.rs2};
+
+            regman.get(3, regs);
+            const psp_gpr_t dst = (psp_gpr_t)regs[0]; 
+            const psp_gpr_t rs1 = (psp_gpr_t)regs[1]; 
+            const psp_gpr_t rs2 = (psp_gpr_t)regs[2]; 
+
+            emit_or(dst, rs1, rs2);
+            
+            if (op.saveN){
+                emit_srl(psp_t0, dst, 31);
+                emit_ins(psp_gp, psp_t0, _flag_N8, _flag_N8);
+            }
+
+            if (op.saveZ){
+                emit_sltiu(psp_t0, dst, 1);
+                emit_ins(psp_gp, psp_t0, _flag_Z8, _flag_Z8);
+            }
+
+            regman.mark_dirty(dst);
+
+            flag_dirty = true; 
+        }
+        break;
+
+        case OP_TST:
+        {
+            int32_t regs[2] = {op.rs1, op.rs2};
+
+            regman.get(2, regs);
+            const psp_gpr_t rs1 = (psp_gpr_t)regs[0]; 
+            const psp_gpr_t rs2 = (psp_gpr_t)regs[1];
+
+            emit_and(psp_t1, rs1, rs2);
+
+            if (op.saveN){
+                emit_srl(psp_t0, psp_t1, 31);
+                emit_ins(psp_gp, psp_t0, _flag_N8, _flag_N8);
+            }
+
+            if (op.saveZ){
+                emit_sltiu(psp_t0, psp_t1, 1);
+                emit_ins(psp_gp, psp_t0, _flag_Z8, _flag_Z8);
+            } 
+
+            flag_dirty = true;         
+        }
+        break;
+
+        case OP_SWI:
+        {
+            regman.flush_all();
+
+            uint32_t optmizeDelaySlot = emit_SlideDelay();
+
+            emit_jal(cpu->swi_tab[op.rs1]);
+            emit_Write32(optmizeDelaySlot);
+        }
+
+        case OP_CMP:
+        {
+            /*psp_gpr_t rs1 = reg_alloc.getReg(op.rs1, psp_a0);
+            psp_gpr_t rs2 = reg_alloc.getReg(op.rs2, psp_a1);
+
+            if (op.preOpType == PRE_OP_IMM)
+                emit_li(psp_a1, op.imm);
+            else if (rs2 != psp_a1) emit_move(psp_a1, rs2);
+            
+            if (rs1 != psp_a0) emit_move(psp_a0, rs1);
+            
+
+            emit_jal(set_sub_flags); 
+            emit_subu(psp_v0, psp_a0, psp_a1);  
+
+            flag_dirty = true;   */   
+        }
+        break;
+ 
+        case OP_MUL:
+        {
+            int32_t regs[3] = {op.rd, op.rs1, op.rs2};
+
+            regman.get(3, regs);
+            const psp_gpr_t dst = (psp_gpr_t)regs[0]; 
+            const psp_gpr_t rs1 = (psp_gpr_t)regs[1];
+            const psp_gpr_t rs2 = (psp_gpr_t)regs[2];
+
+            emit_mult(rs1, rs2);
+            emit_mflo(dst);
+
+            regman.mark_dirty(dst);
+            
+            if (op.saveN){
+                emit_srl(psp_t0, dst, 31);
+                emit_ins(psp_gp, psp_t0, _flag_N8, _flag_N8);
+            }
+
+            if (op.saveZ){
+                emit_sltiu(psp_t0, dst, 1);
+                emit_ins(psp_gp, psp_t0, _flag_Z8, _flag_Z8);
+            }
+
+            flag_dirty = true;          
+        }
+        break;
+
+        case OP_MOV:
+        {
+            int32_t regs[2] = {op.rd, op.rs1};
+
+            regman.get(2, regs);
+            const psp_gpr_t dst = (psp_gpr_t)regs[0]; 
+            const psp_gpr_t src = (psp_gpr_t)regs[1]; 
+
+            if (op.preOpType == PRE_OP_IMM){
+                emit_li(dst, op.imm);
+            }else{
+                emit_move(dst, src);
+            }
+
+            if (op.saveN){
+                emit_srl(psp_t0, dst, 31);
+                emit_ins(psp_gp, psp_t0, _flag_N8, _flag_N8);
+            }
+
+            if (op.saveZ){
+                emit_sltiu(psp_t0, dst, 1);
+                emit_ins(psp_gp, psp_t0, _flag_Z8, _flag_Z8);
+            }
+
+            regman.mark_dirty(dst);
+
+            flag_dirty = true;
+        }
+        break;
+
+        case OP_LDR:
+        case OP_LDRH:
+        {
+           int32_t regs[3] = {op.rd, op.rs1, op.rs2};
+
+           regman.get(3, regs);
+           const psp_gpr_t rd = (psp_gpr_t)regs[0]; 
+           const psp_gpr_t rs1 = (psp_gpr_t)regs[1];
+           const psp_gpr_t rs2 = (psp_gpr_t)regs[2];
+
+           //printf("0x%x\n", emit_getCurrAdr());
+ 
+            if (op.preOpType == PRE_OP_REG) {
+                emit_addu(psp_a0, rs1, rs2);
+            }
+            else
+                emit_addiu(psp_a0, rs1, op.imm);
+
+            regman.flush_all();
+
+            if (op._op == OP_LDR){
+                emit_sll(regs[0], psp_a0, 3);
+
+                emit_jal(_MMU_read32<PROCNUM>);
+                emit_ins(psp_a0, psp_zero, 1, 0);
+
+                emit_rotrv(regs[0], psp_v0, regs[0]);
+
+            }else{
+                emit_jal(_MMU_read16<PROCNUM>);
+                emit_ins(psp_a0, psp_zero, 0, 0);
+
+                emit_move(regs[0], psp_v0);
+            }
+
+            regman.reset(); 
+
+            regman.map(op.rd, (psp_gpr_t)regs[0]);
+            regman.mark_dirty((psp_gpr_t)regs[0]);
+           break;
+        }
+
+        case OP_STR:
+        case OP_STRH:
+        {
+
+           //printf("0x%x\n", emit_getCurrAdr());
+
+           int32_t regs[3] = {op.rd, op.rs1, op.rs2};
+
+           regman.get(3, regs);
+           const psp_gpr_t rs1 = (psp_gpr_t)regs[0]; 
+           const psp_gpr_t rs2 = (psp_gpr_t)regs[1];  
+
+
+           if (op.preOpType == PRE_OP_REG) {
+                //printf("0x%x\n", emit_getCurrAdr());
+                const psp_gpr_t rs3 = (psp_gpr_t)regs[2]; 
+                emit_addu(psp_a0, rs1, rs3);
+            }
+            else
+                emit_addiu(psp_a0, rs1, op.imm);
+
+            emit_move(psp_a1, rs2);
+            regman.flush_all(true);
+
+
+            if (op._op == OP_STR){
+                    emit_jal(_MMU_write32<PROCNUM>); 
+                    emit_ins(psp_a0, psp_zero, 1, 0);
+            }else{
+                    emit_jal(_MMU_write16<PROCNUM>); 
+                    emit_ins(psp_a0, psp_zero, 0, 0);
+            }
+
+           break;
+        }
+
+        case OP_MVN:
+        {
+            int32_t regs[2] = {op.rd, op.rs1};
+
+            regman.get(2, regs);
+            const psp_gpr_t dst = (psp_gpr_t)regs[0]; 
+            const psp_gpr_t rs1 = (psp_gpr_t)regs[1]; 
+
+            emit_not(dst, rs1);
+            
+            if (op.saveN){
+                emit_srl(psp_t0, dst, 31);
+                emit_ins(psp_gp, psp_t0, _flag_N8, _flag_N8);
+            }
+
+            if (op.saveZ){
+                emit_sltiu(psp_t0, dst, 1);
+                emit_ins(psp_gp, psp_t0, _flag_Z8, _flag_Z8);
+            }
+
+            regman.mark_dirty(dst);
+
+            flag_dirty = true;     
+        }
+        break;
+
+        default:
+            printf("Unknown Thumb OP: %d\n", op._op);
+            exit(1);
+        break;
+    }
+}
+
+template bool block::emitThumbBlock<0>();
+template bool block::emitThumbBlock<1>();
