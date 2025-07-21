@@ -247,10 +247,10 @@ public:
 //while the fifo was full, apparently expecting the fifo not to be full by that time.
 //in general we are finding that 3d takes less time than we think....
 //although maybe the true culprit was charging the cpu less time for the dma.
-#define GFX_DELAY(x) NDS_RescheduleGXFIFO(1);
-#define GFX_DELAY_M2(x) NDS_RescheduleGXFIFO(1); 
+#define GFX_DELAY(x) NDS_RescheduleGXFIFO(1, false);
+#define GFX_DELAY_M2(x) NDS_RescheduleGXFIFO(1, false); 
 
-#define V_GFX_DELAY(x) NDS_RescheduleGXFIFO(x);
+#define V_GFX_DELAY(x) NDS_RescheduleGXFIFO(x, false);
 
 using std::max;
 using std::min;
@@ -2334,7 +2334,7 @@ void gfx3d_execute3D()
 	//this is a SPEED HACK
 	//fifo is currently emulated more accurately than it probably needs to be.
 	//without this batch size the emuloop will escape way too often to run fast.
-	//u8 cost = 0;
+	u8 cost = 0;
 
 	//sceGuStart(GU_DIRECT, &gfx3d_commandBuffer[0]);
 
@@ -2344,7 +2344,7 @@ void gfx3d_execute3D()
 		{
 			//if (isSwapBuffers) printf("Executing while swapbuffers is pending: %d:%08X\n",cmd,param);
 
-			GFX_DELAY(1);
+			//GFX_DELAY(1);
 
 			//since we did anything at all, incur a pipeline motion cost.
 			//also, we can't let gxfifo sequencer stall until the fifo is empty.
@@ -2356,7 +2356,7 @@ void gfx3d_execute3D()
 			//if(HasTo_ogfx3d_execute(cmd,param))
 			gfx3d_execute(cmd, param);
 
-			//cost++;
+			cost++;
 			//this is a COMPATIBILITY HACK.
 			//this causes 3d to take virtually no time whatsoever to execute.
 			//this was done for marvel nemesis, but a similar family of 
@@ -2364,13 +2364,13 @@ void gfx3d_execute3D()
 			//the true answer is probably dma bus blocking.. but lets go ahead and try this and
 			//check the compatibility, at the very least it will be nice to know if any games suffer from
 			//3d running too fast
-			MMU.gfx3dCycles = nds_timer + 1;
+			//MMU.gfx3dCycles = nds_timer + 1;
 		} else break;
 	}
 
 	//sceGuFinish();
 	
-	//if (cost) V_GFX_DELAY(cost); 
+	if (cost) V_GFX_DELAY(cost); 
 }
 
 void gfx3d_glFlush(u32 v)

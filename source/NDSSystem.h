@@ -158,7 +158,7 @@ extern u64 nds_timer;
 #define NDS_ReschedulePtr (*(bool*)(0x0010080))
 #define NDS_Reschedule() { NDS_ReschedulePtr = true; }
 
-void NDS_RescheduleGXFIFO(u32 cost);
+void NDS_RescheduleGXFIFO(u32 cost, bool update);
 void NDS_RescheduleDMA();
 void NDS_RescheduleReadSlot1(int procnum, int size);
 void NDS_RescheduleTimers();
