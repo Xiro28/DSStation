@@ -159,6 +159,7 @@ static inline void transformVertex(const VERT &vert, const VIEWPORT &viewport, V
         "vmul.p     c000, c000, c102   \n" // multiply with pre-set scale factor (c102)
         "vadd.p     c000, c000, c100   \n" // add viewport offset
         "vsub.s     s001, s200, s001   \n" // flip Y (S200 should hold constant 232)
+		"vadd.s     s000, s000, s201   \n" // add viewport x offset
         "sv.s       s000, 0 + %0      \n" // store x
         "sv.s       s001, 4 + %0      \n" // store y
         "sv.s       s002, 8 + %0      \n" // store z
@@ -212,12 +213,15 @@ public:
 			/*sceGuTexFlush();
 			sceGuTexProjMapMode(GU_UV);*/
 
+			
 			sceGuTexMode(GU_PSM_8888, 0, 0, 0);
-			//sceGuTexFilter(GU_NEAREST, GU_NEAREST);
+			sceGuTexFilter(GU_NEAREST, GU_NEAREST);
 			sceGuTexWrap(BIT16(newTexture->texformat) ? GU_REPEAT : GU_CLAMP, BIT17(newTexture->texformat) ? GU_REPEAT : GU_CLAMP);
 
-			u16 __attribute__((aligned(16))) tbw = (newTexture->bufferWidth + 15) & ~15;
-			sceGuTexImage(0, roundToExp2(newTexture->sizeX), roundToExp2(newTexture->sizeY), tbw, newTexture->decoded);
+			u16 tbw = (newTexture->bufferWidth + 15) & ~15;
+			sceGuTexImage(0, newTexture->sizeX, newTexture->sizeY, tbw, newTexture->decoded);
+
+			
 			
 			//sceGuTexScale(newTexture->invSizeX, newTexture->invSizeY);
 		}
@@ -240,8 +244,7 @@ public:
 		static const uint8_t oglCullingMode[4] = {0, GU_CW, GU_CCW, 0};
 		uint8_t cullingMode = oglCullingMode[attr.surfaceCullingMode];
 
-		if (cullingMode)
-		{
+	    if (cullingMode){
 			sceGuEnable(GU_CULL_FACE);
 			sceGuFrontFace(cullingMode);
 		}
@@ -306,15 +309,14 @@ public:
 
 		const size_t polyCount = engine->polylist->count; //engine->clippedPolyCounter;
 
-		static const int GUPrimitiveType[] = { GU_TRIANGLES , GU_TRIANGLE_FAN, GU_TRIANGLES , GU_TRIANGLE_FAN , GU_TRIANGLE_FAN, GU_TRIANGLE_FAN, GU_LINE_STRIP,GU_LINE_STRIP };
+		static const int GUPrimitiveType[] = { GU_TRIANGLES , GU_TRIANGLE_FAN, GU_TRIANGLES , GU_TRIANGLE_FAN , GU_TRIANGLE_FAN, GU_TRIANGLE_FAN, GU_TRIANGLE_FAN, GU_TRIANGLE_FAN };
 
-		static const int sz[] = {3, 4, 3, 4, 3, 4, 3, 4};
+		static const int sz[] = {3, 4, 3, 4, 4, 4, 4, 4};
 		
 		bool first = true;
 		int VertListIndex = 0;
 		
 		const bool _3dOnTop = MainScreen.offset == 0;
-		const int xOffset = _3dOnTop ? 0 : 240; // precompute offset
 
 
 		VIEWPORT viewport;
@@ -334,6 +336,11 @@ public:
 
 		__asm__ volatile("viim.s S200, 232\n");
 
+		if (!_3dOnTop)
+			__asm__ volatile("viim.s S201, 240\n");
+		else
+			__asm__ volatile("viim.s S201, 0\n");
+
 		for(int i=0; i < polyCount; i++)
 		{
 			POLY &poly = engine->polylist->list[engine->indexlist->list[i]];
@@ -341,6 +348,7 @@ public:
 
 			if (lastPolyAttr != poly.polyAttr || i == 0)
 			{
+				
 				if (batching){
 					//sceKernelDcacheWritebackRange(&vertices[batch_start], batched_draws * sizeof(Vertex));
 					sceGuDrawArray(lastPolyPrimitive, GU_TEXTURE_32BITF|GU_COLOR_8888|GU_VERTEX_32BITF|GU_TRANSFORM_2D, batched_draws, 0, &vertices[batch_start]);
@@ -349,10 +357,11 @@ public:
 				SetupPoly(poly);
 				polyAttr.setup(poly.polyAttr);
 
+				batching = 0;
+
 				if (!polyAttr.isVisible(poly.backfacing) && !polyAttr.drawBackPlaneIntersectingPolys)
                     continue;
-
-				batching = 0;
+					
 			}
 
 
@@ -367,8 +376,8 @@ public:
 				this->SetupTexture(poly);
 				lastTexParams = poly.texParam;
 				lastTexPalette = poly.texPalette;
-				sceGuDrawArray(lastPolyPrimitive, GU_TRANSFORM_3D, 0, 0, &vertices[batch_start]);
-				
+				//sceGuDrawArray(lastPolyPrimitive, GU_TRANSFORM_3D, 0, 0, &vertices[batch_start]);
+				sceGuSendCommandi(0x12, (1<<23)); // Be able to transform using 2d draws the texture coordinates
 				batching = 0;
 			}
 
@@ -387,6 +396,7 @@ public:
 
 			const int polyPrimitive = !poly.isWireframe() ? GUPrimitiveType[poly.vtxFormat] : GU_LINE_STRIP;
 			int vertexCount = sz[poly.vtxFormat];
+
 		
 			if (polyPrimitive != lastPolyPrimitive || polyPrimitive != GU_TRIANGLES) {
 				if (batching){
@@ -402,34 +412,48 @@ public:
                                  ? static_cast<uint8_t>(divide5bitBy31_LUT[gfx3d.renderState.alphaTestRef] * 255)
                                  : 255;
 
+			bool skip_vertex = false;
+
 			for (int j = 0; j < vertexCount; j++) {
-                VERT &vert = engine->vertlist->list[poly.vertIndexes[j]];
-                Vertex &out = vertices[VertListIndex + j];
+				VERT &vert = engine->vertlist->list[poly.vertIndexes[j]];
 
-                ArraytoColor.r = static_cast<uint8_t>(vert.color[0] << 3);
-                ArraytoColor.g = static_cast<uint8_t>(vert.color[1] << 3);
-                ArraytoColor.b = static_cast<uint8_t>(vert.color[2] << 3);
-                out.col = ArraytoColor.color;
-
-                out.u = vert.u;
-                out.v = vert.v;
-
-                // Transform vertex position.
-                transformVertex(vert, viewport, out);
-                out.x += xOffset; // Apply precomputed offset.
-            }
-
-
-			if (batching) {
-				batched_draws += vertexCount;
-			} else {
-				batch_start = VertListIndex;
-				batched_draws = vertexCount;
-				lastPolyPrimitive = polyPrimitive;
-				batching = 1;
+				if (vert.w < 0 && vert.z < 0) {
+					skip_vertex = true;
+					break;
+				}
 			}
 
-			VertListIndex += vertexCount;
+			if (!skip_vertex)
+			{
+				for (int j = 0; j < vertexCount; j++) {
+					VERT &vert = engine->vertlist->list[poly.vertIndexes[j]];
+					Vertex &out = vertices[VertListIndex + j];
+
+					ArraytoColor.r = static_cast<uint8_t>(vert.color[0] << 3);
+					ArraytoColor.g = static_cast<uint8_t>(vert.color[1] << 3);
+					ArraytoColor.b = static_cast<uint8_t>(vert.color[2] << 3);
+					out.col = ArraytoColor.color;
+
+					out.u = vert.u;
+					out.v = vert.v;
+
+
+					// Transform vertex position.
+					transformVertex(vert, viewport, out);
+				}
+
+
+				if (batching) {
+					batched_draws += vertexCount;
+				} else {
+					batch_start = VertListIndex;
+					batched_draws = vertexCount;
+					lastPolyPrimitive = polyPrimitive;
+					batching = 1;
+				}
+
+				VertListIndex += vertexCount;
+			}
 		}
 
 		//sceKernelDcacheWritebackRange(&vertices[batch_start], batched_draws * sizeof(Vertex));

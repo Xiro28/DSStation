@@ -536,6 +536,13 @@ struct VERT_POS4f
 	}
 };
 
+enum PolygonType
+{
+	POLYGON_TYPE_UNDEFINED		= 0,
+	POLYGON_TYPE_TRIANGLE		= 3,
+	POLYGON_TYPE_QUAD			= 4
+};
+
 //dont use SSE optimized matrix instructions in here, things might not be aligned
 //we havent padded this because the sheer bulk of data leaves things running faster without the extra bloat
 struct VERT {
@@ -555,6 +562,7 @@ struct VERT {
 
 	u8 color[4];
 	float fcolor[4];
+	//bool converted;
 
 	void set_coord(float x, float y, float z, float w) { 
 		this->x = x; 

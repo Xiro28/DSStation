@@ -67,8 +67,8 @@ const char *GetLanguageText(int lang)
 }
 
 const char *GetFPSCapText(int val){
-	static const char *capMap[] = {"No cap", "60", "50", "30", "20", "15", "10", "5"};
-	if (val < 0 || val >= 8)
+	static const char *capMap[] = {"No cap", "60", "50", "40", "30", "25"};
+	if (val < 0 || val >= 6)
 		return "UNK";
 	return capMap[val];
 }
@@ -108,9 +108,15 @@ void InitMainSettings(configured_features *params)
 	c = addSetting(settings, c, "FPS Cap", "Limit the frames per second", 1);
 	params->fps_cap_num = settings[7].value;
 
-	/*c = addSetting(settings, c, "Use cached Interpreter", "For a better stability but sometimes slower", 0);
-	params->cached_interpreter = settings[8].value;
-*/	
+	//c = addSetting(settings, c, "Use cached Interpreter", "For a better stability but sometimes slower", 0);
+	//params->cached_interpreter = settings[8].value;
+
+	c = addSetting(settings, c, "Sort 3D polygons", "It helps in some game to improve the rendering. Can cause artifacts in other games", 0);
+	params->sort_3d = settings[8].value;
+
+	c = addSetting(settings, c, "3D always on top", "Draw 3D always on top of 2D scene", 0);
+	params->_3d_always_on_top = settings[9].value;
+
 	totalSettings = c;
 }
 
@@ -125,7 +131,8 @@ void FinalizeMainSettings(configured_features *params)
 	params->Render3D = settings[6].value;
 	//params->FastMERendering = settings[7].value;
 	params->fps_cap_num = settings[7].value;
-	params->cached_interpreter = settings[8].value;
+	params->sort_3d = settings[8].value;
+	params->_3d_always_on_top = settings[9].value;
 }
 
 
@@ -377,7 +384,7 @@ void DoConfig(configured_features *params)
 						}
 						else if (strcmp(settings[selposconfig].name, "FPS Cap") == 0)
 						{
-							settings[selposconfig].value = std::max(0, (settings[selposconfig].value - 1) % 8);
+							settings[selposconfig].value = std::max(0, (settings[selposconfig].value - 1) % 6);
 						}
 						else
 						{
@@ -396,7 +403,7 @@ void DoConfig(configured_features *params)
 						}
 						else if (strcmp(settings[selposconfig].name, "FPS Cap") == 0)
 						{
-							settings[selposconfig].value = (settings[selposconfig].value + 1) % 8;
+							settings[selposconfig].value = (settings[selposconfig].value + 1) % 6;
 						}
 						else
 						{

@@ -72,3 +72,11 @@ asm_fast_wrt32:
     SLT $8, $4, $5
     JR $31
     INS  $28, $8, 4, 1
+
+
+#include "pspstub.s"
+	STUB_FUNC  0x60A41671,usrDebugProfilerEnable
+    STUB_FUNC  0xDA92A4C9,usrDebugProfilerDisable
+    STUB_FUNC  0x42919B17,usrDebugProfilerClear
+    STUB_FUNC  0xCC65DB8D,usrDebugProfilerGetRegs
+	STUB_END

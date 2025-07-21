@@ -62,6 +62,8 @@ extern buttonstruct<bool> AutoHold;
 extern volatile bool execute;
 extern BOOL click;
 
+extern void NDS_applyFinalInputDirect(u16, u16);
+
 /*
  * The firmware language values
  */
@@ -148,9 +150,13 @@ void emu_halt();
 
 extern u64 nds_timer;
 
+#define SCRATCHPAD_ADDR				0x00010000		/* Physical         */
+#define SCRATCHPAD_SIZE				0x00004000		/* Size             */
+
+
 //fast reschedule
-#define NDS_ReschedulePtr (*(bool*)(0x00010000))
-#define NDS_Reschedule() NDS_ReschedulePtr = true
+#define NDS_ReschedulePtr (*(bool*)(0x0010080))
+#define NDS_Reschedule() { NDS_ReschedulePtr = true; }
 
 void NDS_RescheduleGXFIFO(u32 cost);
 void NDS_RescheduleDMA();
@@ -483,7 +489,8 @@ void NDS_SetupDefaultFirmware();
 
 //void execHardware_doAllDma(EDMAMode modeNum);
 
-template<bool FORCE> void NDS_exec(s32 nb = 560190<<1);
+void NDS_setup();
+extern "C" void * NDS_exec;
 
 
 extern int lagframecounter;
@@ -658,6 +665,7 @@ void MovieSRAM();
 void ClearAutoHold(void);
 
 bool ValidateSlot2Access(u32 procnum, u32 demandSRAMSpeed, u32 demand1stROMSpeed, u32 demand2ndROMSpeed, int clockbits);
+void NDS_RescheduleWiFi(u64 cycles);
 
 //MUSTANG
 //extern ADVANsCEne	advsc;

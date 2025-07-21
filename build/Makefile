@@ -28,6 +28,7 @@ $(SRCDIR)/mic.o \
 $(SRCDIR)/me_engine.o \
 $(SRCDIR)/MMU.o \
 $(SRCDIR)/NDSSystem.o \
+$(SRCDIR)/profiler.o \
 $(SRCDIR)/path.o \
 $(SRCDIR)/readwrite.o \
 $(SRCDIR)/render3D.o \
@@ -84,6 +85,7 @@ $(SRCDIR)/PSP/pspOpUtil.o \
 $(SRCDIR)/PSP/kcalli.o \
 $(SRCDIR)/sndsdl.o \
 $(SRCDIR)/sndpsp.o \
+$(SRCDIR)/wifi_hle.o \
 $(SRCDIR)/ctrlssdl.o \
 $(SRCDIR)/mips_code_emiter.o \
 $(SRCDIR)/main.o
@@ -95,10 +97,11 @@ CXX=psp-g++
 PSPSDK = $(shell psp-config --pspsdk-path)
 PSPDEV = $(shell psp-config -d)
 
-CFLAGS = -std=c++2b -Ofast -DNOPRINTF -fno-pic -fno-rtti -ffast-math -fweb -g3  -G0 -Wall -D PSP -D NOSSE2 -D HAVE_LIBZ -funsigned-char -Wall \
-                  -fstrict-aliasing -falign-functions=64 \
-                  -falign-loops=64 -falign-jumps=64 -D HAVE_JIT \
-                  -fcall-saved-s0 -fcall-saved-s1 -fcall-saved-s2 -fcall-saved-s3 -fcall-saved-s4 
+CFLAGS = -std=c++2b -Ofast -DNOPRINTF -ffast-math -fweb -g3 \
+    -G0 -Wall -D PSP -D NOSSE2 -D HAVE_LIBZ -funsigned-char -Wall \
+                  -fstrict-aliasing -falign-loops=64 -D HAVE_JIT \
+                  -fcall-saved-s0 -fcall-saved-s1 -fcall-saved-s2 -fcall-saved-s3 -fcall-saved-s4 \
+                    #  -pg 
 
 
 CXXFLAGS = $(CFLAGS) -fexceptions
@@ -109,7 +112,7 @@ INCDIR =  ./libs/include
 
 LIBDIR = ./libs/lib
 LIBS  =   -ldynarec -lintrafont -lpspdmac -lpspaudiolib -lpspaudio -lpspmath -lpsppower -lglut -lpspgum  -lfreetype -lpng -lz  -lm -lpspgu -lpsphprm -lpspaudio -lstdc++ -lpspvfpu -lpsprtc
-LIBS += -lpspaudiolib -lpspvram  -lpspsdk -lpng -lm 
+LIBS += -lpspaudiolib -lpspvram  -lpspsdk -lpng -lm #-lpspprof
 
 EXTRA_TARGETS = EBOOT.PBP
 PSP_EBOOT_TITLE = Desmume

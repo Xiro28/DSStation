@@ -45,6 +45,15 @@ static inline void meDCacheWritebackInvalidAll() {
   asm volatile ("sync");
 }
 
+static inline void meDCacheWritebackAll() {
+  asm volatile ("sync");
+  for (int i = 0; i < 8192; i += 64) {
+    asm("cache 0x1a, 0(%0)" :: "r"(i));
+    asm("cache 0x1a, 0(%0)" :: "r"(i));
+  }
+  asm volatile ("sync");
+}
+
 static inline void meDCacheInvalidAll() {
   asm volatile ("sync");
   for (int i = 0; i < 8192; i += 64) {

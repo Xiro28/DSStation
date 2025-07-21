@@ -21,10 +21,14 @@
 #include "MD_FIFO.h"
 #include "arm7_hle.h"
 #include "SPU.h"
+#include "NDSSystem.h"
 
 
 
 // MOST OF THE NEW IMPL ARE TAKEN FROM THERE: https://github.com/pret/pokediamond/blob/master/include/nitro/
+u64 alarm_scheduled[8] = {0,0,0,0,0,0,0,0};
+extern u64 nds_timer;
+extern GameInfo gameInfo;
 
 namespace Sound_Nitro
 {
@@ -333,6 +337,7 @@ const u16 SWIPitchTable[768] =
 
 FIFO<u32, 64> CmdQueue;
 u32 SharedMem;
+int32_t sc_arm7 = -1; // I don't knwo what this is for but it seesm to be used for terminating something in the sound thread
 u32 Counter = 0x12345678;
 
 Channel Channels[16];
@@ -377,6 +382,7 @@ void SNDi_InitSharedWork(struct SNDSharedWork *sw) {
     }
 }
 
+u32 offset_cmd = 999;
 
 void Reset()
 {
@@ -427,7 +433,50 @@ void Reset()
     SNDi_InitSharedWork((SNDSharedWork*)SharedMem);
 
     Version = 0;
+    offset_cmd = 999;
 
+    u32 a9exe = gameInfo.header.ARM7exe;
+
+    // Idea taken from nds-bootstrap.
+    // Check for the libnds version in the ARM9 binary.
+    // The first 4 bytes of the ARM9 binary are the libnds version.
+    u32 val_1 = _MMU_read32<ARMCPU_ARM7>(a9exe);
+    u32 val_2 = _MMU_read32<ARMCPU_ARM7>(a9exe+4);
+    u32 val_3 = _MMU_read32<ARMCPU_ARM7>(a9exe+8);
+    u32 val_4 = _MMU_read32<ARMCPU_ARM7>(a9exe+12);
+    u32 val_5 = _MMU_read32<ARMCPU_ARM7>(a9exe+16);
+    u32 val_6 = _MMU_read32<ARMCPU_ARM7>(a9exe+20);
+    u32 val_7 = _MMU_read32<ARMCPU_ARM7>(a9exe+24);
+
+   
+    printf("ARM7: %08X %08X %08X %08X %08X %08X %08X\n", val_1, val_2, val_3, val_4, val_5, val_6, val_7);
+
+    //E3A0C301 E58CC208 E59F106C E3A0050E E1500001 51A01000 E59F2060
+    //E3A0C301 E58CC208 E59F1088 E3A0050E E1500001 51A01000 E59F207C
+    //E3A0C301 E58CC208 E59F1088 E3A0050E E1500001 51A01000 E59F207C
+
+    printf("GAME: %s\n", gameInfo.header.gameCode);
+
+    if (!memcmp(gameInfo.header.gameCode, "ASM", 3)) // ASMx / Super Mario 64 DS
+        Version = 1;
+    /*else if (   !memcmp(gameInfo.header.gameCode, "AUG", 3) ||
+                !memcmp(gameInfo.header.gameCode, "AZK", 3) ||
+                !memcmp(gameInfo.header.gameCode, "ARY", 3)) // Need for Speed - Underground 2 | Zoo Keeper
+        offset_cmd = 3;
+    else if (!memcmp(gameInfo.header.gameCode, "ACV", 4))
+        offset_cmd = 2;*/
+
+    /*if (!memcmp(gameInfo.header.gameCode, "ACV", 4)) // E3A0C301 E58CC208 EB000081 E3A00013
+        offset_cmd = 2;
+    else if ((val_1 == 0xE3A0C301 && val_2 == 0xE58CC208 && val_3 == 0xEB000078 && val_4 == 0xE3A00013)) // ASMx / Super Mario 64 DS
+        Version = 1;
+    else if ((val_1 == 0xE3A0C301 && val_2 == 0xE58CC208 && val_3 == 0xEB000081 && val_4 == 0xE3A00013)) // Need for Speed - Underground 2 | Zoo Keeper ....
+        offset_cmd = 3;
+   */// else if ((val_1 == 0xE3A0C301 && val_2 == 0xE58CC208 && val_3 == 0xE1DC00B6 && val_4 == 0xE3500000)) // TODO
+
+
+
+    SPU_SetVolume(0x7F);
     /*if (!memcmp(gameInfo.header.gameCode,"ASM", 3)) // ASMx / Super Mario 64 DS
         Version = 1;*/
 
@@ -441,18 +490,18 @@ void Reset()
     NDS::ScheduleEvent(NDS::Event_HLE_SoundCmd, true, 174592, Process, 1);*/
 }
 
-
 void OnAlarm(u32 num)
 {
     Alarm& alarm = Alarms[num];
     if (!alarm.Active) return;
+
 
     SendIPCReply(0x7, num | (alarm.Param << 8));
 
     u32 delay = alarm.Repeat;
     if (delay)
     {
-        //NDS::ScheduleEvent(NDS::Event_HLE_SoundAlarm0+num, true, delay*64, OnAlarm, num);
+        alarm_scheduled[num] = nds_timer + delay*64;//NDS::ScheduleEvent(NDS::Event_HLE_SoundAlarm0+num, true, delay*64, OnAlarm, num);
     }
     else
     {
@@ -979,7 +1028,8 @@ void ProcessCommands()
         0x13, 0x14, 0x15, 0x16, 0x17, 0x19, 0x1A, 0x1B,
         0x1C, 0x1D, 0x21, 0x1E, 0x1F, 0x20
     };
-
+    //u32 flag = _MMU_ARM7_read32(0x27c3ff8);
+    //_MMU_ARM7_write32(0x27c3ff8, flag ^ 1);
     while (!CmdQueue.IsEmpty())
     {
         u32 cmdbuf = CmdQueue.Read();
@@ -989,7 +1039,7 @@ void ProcessCommands()
             u32 next = _MMU_read32<ARMCPU_ARM7>(cmdbuf+0x00);
             u32 cmd = _MMU_read32<ARMCPU_ARM7>(cmdbuf+0x04);
 
-            //printf("cmd %08X %08X\n", next, cmd);
+           //printf("cmd %08X %08X\n", next, cmd);
 
             u32 args[4];
             for (u32 i = 0; i < 4; i++)
@@ -999,12 +1049,21 @@ void ProcessCommands()
             {
                 // COMMAND TRANSLATE for SM64DS (early sound engine version)
                 cmd = cmd_trans_early[cmd];
-            }else if (Version == 2)
+            }else if (cmd >= 2)
             {
-                if (cmd >= 2)
-                    cmd += 3;
+                /* Most games start with 1D as first command, let's for now take this as 
+                   reference for automatically adjust the offset of the command*/
+                // 999 is a special value to indicate that we should calculate the offset
+                // since it is not known at the start
+                if (offset_cmd == 999){
+                    offset_cmd = 0x1D - cmd;
+                    printf("cmd offset %d\n", offset_cmd);
+                    //printf("cmd %08X %08X %08X %08X %08X %08X\n", cmd, args[0], args[1], args[2], args[3], next);
+                }
+                cmd += offset_cmd;
             }
 
+            //printf("cmd %08X %08X %08X %08X %08X %08X\n", cmd, args[0], args[1], args[2], args[3], next);
             switch (cmd)
             {
             case 0x0: // play sequence, directly
@@ -1043,6 +1102,31 @@ void ProcessCommands()
                 }
                 break;
 
+               
+            case 0x4: // start sequence
+                {
+                    int seq_id = args[0];
+                    bool flag = args[1] & 1;
+
+                    Sequence* seq = &Sequences[seq_id];
+
+                    seq->StatusFlags &= 0b011;
+                    seq->StatusFlags |= (flag<<2);
+
+                    if (flag){
+                        for (int i = 0; i < 16; i++)
+                        {
+                            Track* track = GetSequenceTrack(seq, i);
+                            if (!track) continue;
+                        
+                            FinishTrack(track, seq, -1);
+                            UnlinkTrackChannels(track);
+                        }
+                    }
+
+
+                }
+                break;
             case 0x6: // set sequence param
                 {
                     // normally, writes directly to the sequence structure
@@ -1123,21 +1207,19 @@ void ProcessCommands()
 
             case 0xA: // write to sharedmem
                 {
-                    if (SharedMem){
-                        printf("Write local sharemem %08X %08X\n", args[0], args[1]);
-                        u32 addr = (u32)&((SNDSharedWork*)SharedMem)->players[args[0] & 0xF].localVars[args[1] & 0XF];
-                        _MMU_write16<ARMCPU_ARM7>(addr, args[2] & 0xFFFF);
-                    }
+                    printf("Write local sharemem %08X %08X\n", args[0], args[1]);
+                    u32 addr = SharedMem + (args[0] * 0x24) + (args[1] * 2) + 0x20;
+                    _MMU_write16<ARMCPU_ARM7>(addr, args[2] & 0xFFFF);
                 }
                 break;
 
             case 0xB: // write to sharedmem
                 {
-                    if (SharedMem){
+                    /*if (SharedMem){
                         printf("Write global sharemem %08X %08X\n", args[0], args[1]);
                         u32 addr = (u32)&((SNDSharedWork*)SharedMem)->globalVars[args[0] & 0xF];
                         _MMU_write16<ARMCPU_ARM7>(addr, args[1] & 0xFFFF);
-                    }
+                    }*/
                 } 
                 break;
 
@@ -1185,6 +1267,7 @@ void ProcessCommands()
 
                         u32 delay = alarm.Repeat;
                         if (!delay) delay = alarm.Delay;
+                        alarm_scheduled[i] = nds_timer + delay*64;
                         //NDS::ScheduleEvent(NDS::Event_HLE_SoundAlarm0+i, false, delay*64, OnAlarm, i);
                     }
 
@@ -1374,17 +1457,17 @@ void ProcessCommands()
                     u32 mixch1 = args[2];
                     u32 mixch3 = args[3];
 
-                    u8 cnt = _MMU_read08<ARMCPU_ARM7>(0x04000501);
+                    u8 cnt = SPU_ReadByte(0x04000501);
                     cnt &= 0x80;
                     cnt |= (outputL & 0x3);
                     cnt |= (outputR & 0x3) << 2;
                     cnt |= (mixch1 & 0x1) << 4;
                     cnt |= (mixch3 & 0x1) << 5;
-                    _MMU_write08<ARMCPU_ARM7>(0x04000501, cnt);
+                    SPU_WriteByte(0x04000501, cnt);
                 }
                 break;
 
-            case 0x1A:
+            case 0x1A: //SND_LockChannel
                 {
                     u32 channelMask = args[0];
                     u32 weak = args[1];
@@ -1401,12 +1484,16 @@ void ProcessCommands()
 
                         if (sLockedChannelMask & (1 << i))
                             continue;
+                        
+                        if (chan->Linked)
+                            UnlinkChannel(chan, true);
 
                         StopChannel(i, false);
                         chan->Priority = 0;
 
                         // TODO fix me - change only bit 1 and bit 4-8 to 0
-                        chan->StatusFlags = 0;
+                        //chan->StatusFlags = 0;
+                        chan->StatusFlags &= ~(0b11110010);
                     }
 
                     if (weak & 1)
@@ -1420,9 +1507,13 @@ void ProcessCommands()
 
                     {
                         //SharedMem += args[0];
+
+                        //SharedMem = args[0];
+                        
+                        /*sc_arm7 = 0; // Init it here
                         printf("%08X\n", SharedMem);
                         printf("unknown sound cmd %08X, %08X %08X %08X %08X\n",
-                        cmd, args[0], args[1], args[2], args[3]);
+                        cmd, args[0], args[1], args[2], args[3]);*/
                     }
                 }
                 break;
@@ -1475,14 +1566,67 @@ void ProcessCommands()
                 //SharedMemPtr = (SNDSharedWork*)&MMU.MAIN_MEM[SharedMem];
                 break;
 
-            case 0x20:
+            case 0x1E: // InvalidateSeq
+            {
+                u32 start_addr = args[0];
+                u32 end_addr = args[1];
+
+                for (int i = 0; i < 16; i++)
                 {
-                    // cmdbuf+08 and cmdbuf+0C = bounds
-                    // stop channels conditionally
-                    printf("unknown sound cmd %08X, %08X %08X %08X %08X\n",
-                       cmd, args[0], args[1], args[2], args[3]);
+                    Sequence* seq = &Sequences[i];
+
+                    if (!(seq->StatusFlags & (1<<0)))
+                        continue;
+                    
+                    for (int j = 0; j < 16; j++)
+                    {
+                        u8 trk_id = seq->Tracks[j];
+                        Track* trk = &Tracks[trk_id];
+
+                        if (!trk)
+                            continue;
+
+                        if (start_addr <= trk->CurNoteAddr && trk->CurNoteAddr <= end_addr)
+                        {
+                            FinishSequence(seq);
+                            break;
+                        }
+                    }
                 }
-                break;
+            }
+            break;
+            case 0x1F: // InvalidatePlayer
+            {
+                u32 start_addr = args[0];
+                u32 end_addr = args[1];
+
+                for (int i = 0; i < 16; i++)
+                {
+                    Sequence* seq = &Sequences[i];
+
+                    if ((seq->StatusFlags & (1<<0)) && start_addr <= seq->SBNKAddr && seq->SBNKAddr <= end_addr)
+                    {
+                        FinishSequence(seq);
+                    }
+                }
+            }
+            break;
+            case 0x20: // InvalidateWave
+            {
+                u32 start_addr = args[0];
+                u32 end_addr = args[1];
+
+                for (int i = 0; i < 16; i++)
+                {
+                    Channel* chan = &Channels[i];
+
+                    if ((chan->StatusFlags & (1 << 0)) && start_addr <= chan->DataAddr && chan->DataAddr <= end_addr && chan->Type == 0)
+                    {
+                        StopChannel(i, false);
+                    }
+                }
+            }
+            break;
 
             default:
                 printf("unknown sound cmd %08X, %08X %08X %08X %08X\n",
@@ -1493,8 +1637,11 @@ void ProcessCommands()
             cmdbuf = next;
         }
 
-        u32 val = _MMU_read32<ARMCPU_ARM7>(SharedMem);
-        _MMU_write32<ARMCPU_ARM7>(SharedMem, val+1);
+        if (SharedMem)
+        {
+            u32 val = _MMU_read32<ARMCPU_ARM7>(SharedMem);
+            _MMU_write32<ARMCPU_ARM7>(SharedMem, val+1);
+        }
     }
 }
 
@@ -2761,8 +2908,10 @@ void Process(u32 param)
     ProcessCommands();
     ProcessSequences(param!=0);
     UpdateChannels(param!=0);
+
     ReportHardwareStatus();
-    UpdateCounter();
+    (void)UpdateCounter();
+
 }
 
 

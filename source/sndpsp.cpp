@@ -26,7 +26,6 @@
 #include <pspaudio.h>
 #include <pspaudiolib.h>
 
-#include"PSP/pl_snd.h"
 
 int SNDPSPInit(int buffersize);
 void SNDPSPDeInit();
@@ -40,16 +39,12 @@ void SNDPSPSetVolume(int volume);
 #define DEFAULT_SAMPLES 512
 #define VOLUME_MAX      0x8000
 
-static u16 *stereodata16;
-static u16 *outputbuffer;
 static u32 soundoffset;
-static volatile u32 soundpos;
+static u32 soundpos;
 static u32 soundlen;
 static u32 soundbufsize;
-static u32 samplecount;
-
-static int handle;
-static int stopAudio;
+static u16* stereodata16;
+static u16 *outputbuffer;
 
 SoundInterface_struct SNDPSP = {
 SNDCORE_PSP,
@@ -63,70 +58,84 @@ SNDPSPUnMuteAudio,
 SNDPSPSetVolume
 };
 
-void MixAudio(void * stream, u32 len, void *userdata) {
-    int i;
-    u8* soundbuf = (u8*)stereodata16;
-    u8* ubuf = (u8*) stream;
+typedef struct {
+    short l, r;
+} sample_t;
 
-    for (i = 0; i < len; i++)
+
+static void MixAudio(uint8_t *stream, unsigned int length) {
+    int i;
+    sample_t* ubuf = (sample_t*) stream;
+    u8 *soundbuf=(u8 *)stereodata16;
+
+    for (i = 0; i < length; i++)
     {
         if (soundpos >= soundbufsize)
             soundpos = 0;
-            
-        u8 sample = soundbuf[soundpos];
-        ubuf[i] = sample;
+
+        stream[i] =  soundbuf[soundpos];
+		
         soundpos++;
     }
 }
 
-/*void Sound_Thread(void* buf, unsigned int length, void *userdata)
+static int Sound_Thread(SceSize args, void *argp)
 {
-   samplecount = PSP_AUDIO_SAMPLE_ALIGN(2048);
-
-   int channel = sceAudioChReserve(PSP_AUDIO_NEXT_CHANNEL, samplecount, PSP_AUDIO_FORMAT_STEREO);
-   
-   while (!stopAudio)
-   {
-        MixAudio((uint8_t*)outputbuffer, 2048 * 4);
-        sceAudioOutput(channel, VOLUME_MAX, outputbuffer);
-      
-   }
-
-   sceAudioChRelease(handle);
-   sceKernelExitThread(0);
-}*/
-
-int SNDPSPInit(int buffersize)
-{
-    const int freq = 44100;
+    const int freq = 441000;
     const int samples = (freq / 60) * 2;
 
     u32 normSamples = 512;
     while (normSamples < samples)
         normSamples <<= 1;
 
-    soundlen = freq / 60; // 60 for NTSC
+        sceAudioChReserve(0, PSP_AUDIO_SAMPLE_ALIGN(735 * 4), PSP_AUDIO_FORMAT_STEREO);
+
+
+   while (true)
+   {
+        MixAudio((uint8_t*)outputbuffer, normSamples);
+        sceAudioOutputBlocking(0, PSP_AUDIO_VOLUME_MAX, outputbuffer);
+   }
+
+   sceKernelExitThread(0);
+   return 0;
+}
+
+
+int SNDPSPInit(int buffersize)
+{
+    int i, j, failed;
+
+   
+
+    //soundlen = freq / 60; // 60 for NTSC
     soundbufsize = buffersize * sizeof(s16) * 2;
     soundpos = 0;
 
-    stereodata16 = (u16 *)malloc(soundbufsize);
-    if (stereodata16 == NULL)
+    
+
+    if ((stereodata16 = (u16*)malloc(soundbufsize)) == NULL)
+        return -1;
+        
+    if ((outputbuffer = (u16*)malloc(soundbufsize * 4)) == NULL)
         return -1;
 
     memset(stereodata16, 0, soundbufsize);
+    memset(outputbuffer, 0, soundbufsize * 4);
 
-    pspAudioInit();
+    SceUID audiothread = sceKernelCreateThread("Audio Thread", Sound_Thread, 0x18, 0x10000, 0, NULL);
+   
+   int res = sceKernelStartThread(audiothread, 0, NULL);
+    
+    printf("\n\nAUDIO PSP Inited\n");
 
-    //pspAudioSetChannelCallback(0, MixAudio, NULL);
-
-    return 0;
+   return 0;
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
 void SNDPSPDeInit()
-{
-    stopAudio = 1;  
+{ 
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -146,13 +155,16 @@ void SNDPSPUpdateAudio(s16 *buffer, u32 num_samples)
        copy2size = 0;
    }
 
+
    memcpy((((u8*)stereodata16) + soundoffset), buffer, copy1size);
 
-   if (copy2size)
-       memcpy(stereodata16, ((u8*)buffer) + copy1size, copy2size);
+   if (copy2size) {
+    memcpy(stereodata16, ((u8*)buffer) + copy1size, copy2size);
+   }
 
    soundoffset += copy1size + copy2size;
    soundoffset %= soundbufsize;
+
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -173,14 +185,13 @@ u32 SNDPSPGetAudioSpace()
 
 void SNDPSPMuteAudio()
 {
-    
+
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
 void SNDPSPUnMuteAudio()
 {
-    
 }
 
 //////////////////////////////////////////////////////////////////////////////

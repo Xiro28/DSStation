@@ -1659,7 +1659,6 @@ void SPU_Emulate_core()
 	spu_core_samples = (int)(samples);
 	samples -= spu_core_samples;
 
-	//printf("SPU_Emulate_core: %d\n", spu_core_samples);
 	
 	// We don't need to mix audio for Dual Synch/Asynch mode since we do this
 	// later in SPU_Emulate_user(). Disable mixing here to speed up processing.

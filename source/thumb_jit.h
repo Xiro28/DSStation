@@ -7,10 +7,6 @@ void emitThumbOP(opcode& op){
 
            flag_dirty = false;
 
-
-            regman.flush_all();
-            regman.reset();  
-
             emit_jal(thumb_instructions_set[op.rs1 >> 6]);
 
             emit_movi(psp_a0,op.rs1&0xFFFF); 
@@ -18,6 +14,23 @@ void emitThumbOP(opcode& op){
             load_flags();
 
             intr_instr++;
+        }
+        break;
+
+        case OP_BXC:
+        {
+            if (flag_dirty) store_flags();
+
+            flag_dirty = false;
+
+            regman.flush_all();
+            regman.reset();  
+
+            currentBlock.JumpOP = true;
+
+            emit_li(psp_a0, op.imm); 
+            emit_jal(jump_to_linked_uncod_thumb);
+            emit_nop();
         }
         break;
 
@@ -229,8 +242,6 @@ void emitThumbOP(opcode& op){
 
         case OP_SWI:
         {
-            regman.flush_all();
-
             uint32_t optmizeDelaySlot = emit_SlideDelay();
 
             emit_jal(cpu->swi_tab[op.rs1]);

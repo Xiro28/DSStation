@@ -368,26 +368,6 @@ SFORMAT reserveChunks[] = {
 	{ 0 }
 };
 
-#define SCE_SCRATCHPAD_ADDR				0x00010000		/* Physical         */
-#define SCE_SCRATCHPAD_SIZE				0x00004000		/* Size             */
-
-static int curr_sz = 0;
-
-void FreeStaticRam(size_t sz) {
-
-	curr_sz -= sz;
-
-	if (curr_sz < 0) curr_sz = 0;
-}
-
-void* GetStaticRam(size_t sz) {
-
-	curr_sz += sz;
-
-	if (curr_sz >= SCE_SCRATCHPAD_SIZE) return nullptr;
-
-	return (void*)(SCE_SCRATCHPAD_ADDR + curr_sz - sz);
-}
 
 static bool s_slot1_loadstate(EMUFILE* is, int size)
 {

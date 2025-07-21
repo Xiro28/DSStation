@@ -14,14 +14,29 @@ int CODE_SIZE = 8 * 1024 * 512; //4MB
 
 u32 LastAddr = 0;
 
+u8 __attribute__((aligned(64)))* currentCodeCache = NULL;
 u8 __attribute__((aligned(64)))* CodeCache;
 
-void* emit_GetPtr()      { return (void*)&CodeCache[LastAddr];                     }
-u32   emit_getCurrAdr()  { return (u32)&CodeCache[LastAddr];   					   }
+void* emit_GetPtr()      { return (void*)&currentCodeCache[LastAddr];                     }
+u32   emit_getCurrAdr()  { return (u32)&currentCodeCache[LastAddr];   					   }
 u32   emit_getPointAdr() { return LastAddr;                                        }
 u32   GetFreeSpace()     { return CODE_SIZE - LastAddr;                            }
 void  emit_Skip(u32 sz)  { LastAddr+=sz;                                           }
 u32   emit_SlideDelay()  { emit_Skip(-4); u32 rv=*(u32*)emit_GetPtr();  return rv; }
+
+void  set_code_cache(u8* cache)
+{
+	if (cache == NULL)
+	{
+		currentCodeCache = CodeCache;
+	}
+	else
+	{
+		currentCodeCache = cache;
+	}
+}
+
+
 u32   emit_Set(u32 _new)
 {
 	const u32 last = LastAddr;
@@ -59,7 +74,7 @@ void emit_mpop(u32 n, ...)
 
 void emit_Write32(u32 data)
 {
-	*(u32*)&CodeCache[LastAddr]=data;
+	*(u32*)&currentCodeCache[LastAddr]=data;
 	LastAddr+=4;
 }
 
@@ -70,7 +85,7 @@ void insert_instruction(psp_insn_t insn)
 
 void emit_Write32Pos(u32 data, u32 pos)
 {
-	*(u32*)&CodeCache[pos]=data;
+	*(u32*)&currentCodeCache[pos]=data;
 }
 
 void insert_instruction2(psp_insn_t insn,u32 pos)
@@ -95,9 +110,10 @@ void make_address_range_executable(u32 address_start, u32 address_end)
 
 void initCodeCache(){
 	sceKernelVolatileMemLock(0, reinterpret_cast<void**>(&CodeCache), &CODE_SIZE); 
-
+	currentCodeCache = CodeCache;
 	memset(CodeCache, 0, CODE_SIZE);
 	LastAddr = 0;
+	printf("Code inited\n");
 }
 
 void resetCodeCache(){
@@ -110,7 +126,7 @@ uint32_t startAddr = 0;
 
 void CodeDump(const char * filename){
 	FILE*f=fopen(filename,"wb");
-	fwrite(&CodeCache[startAddr],LastAddr-startAddr,1,f);
+	fwrite(&currentCodeCache[startAddr],LastAddr-startAddr,1,f);
 	fclose(f);
 }
 

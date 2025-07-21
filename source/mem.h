@@ -37,30 +37,37 @@ enum MMU_ACCESS_TYPE
 	MMU_AT_DEBUG, //used for emulator debugging functions (bypasses some debug handling)
 };
 
-static INLINE u8 T1ReadByte(u8* const mem, const u32 addr)
+/*static INLINE u8 T1ReadByte(u8* const mem, const u32 addr)
 {
    return mem[addr];
-}
+}*/
 
-static INLINE u16 T1ReadWord_guaranteedAligned(void* const mem, const u32 addr)
+#define T1ReadByte(mem, addr) (((u8*)mem)[addr])
+
+/*static INLINE u16 T1ReadWord_guaranteedAligned(void* const mem, const u32 addr)
 {
 	//assert((addr&1)==0);
 #ifdef WORDS_BIGENDIAN
    return (((u8*)mem)[addr + 1] << 8) | ((u8*)mem)[addr];
 #else
-   return *(u16*)((u8*)mem + addr);
+   return *(u16*)((u8*)mem + (addr));
 #endif
-}
+}*/
 
-static INLINE u16 T1ReadWord(void* const mem, const u32 addr)
+#define T1ReadWord_guaranteedAligned(mem, addr) *(u16*)((u8*)mem + (addr))
+
+/*static INLINE u16 T1ReadWord(void* const mem, const u32 addr)
 {
 #ifdef WORDS_BIGENDIAN
    return (((u8*)mem)[addr + 1] << 8) | ((u8*)mem)[addr];
 #else
-   return *((u16 *) ((u8*)mem + addr));
+   return *((u16 *) ((u8*)mem + (addr)));
 #endif
-}
+}*/
 
+#define T1ReadWord(mem, addr) *((u16 *) ((u8*)mem + (addr)))
+
+/*
 static INLINE u32 T1ReadLong_guaranteedAligned(u8* const  mem, const u32 addr)
 {
 	//assert((addr&3)==0);
@@ -68,9 +75,11 @@ static INLINE u32 T1ReadLong_guaranteedAligned(u8* const  mem, const u32 addr)
    return (mem[addr + 3] << 24 | mem[addr + 2] << 16 |
            mem[addr + 1] << 8 | mem[addr]);
 #else
-	return *(u32*)(mem + addr);
+	return *(u32*)(mem + (addr));
 #endif
-}
+}*/
+
+#define T1ReadLong_guaranteedAligned(mem, addr) *(u32*)(mem + (addr))
 
 
 static INLINE u32 T1ReadLong(u8* const  mem, u32 addr)
@@ -80,11 +89,11 @@ static INLINE u32 T1ReadLong(u8* const  mem, u32 addr)
    return (mem[addr + 3] << 24 | mem[addr + 2] << 16 |
            mem[addr + 1] << 8 | mem[addr]);
 #else
-   return *(u32*)(mem + addr);
+   return *(u32*)(mem + (addr));
 #endif
 }
 
-static INLINE u64 T1ReadQuad(u8* const mem, const u32 addr)
+/*static INLINE u64 T1ReadQuad(u8* const mem, const u32 addr)
 {
 #ifdef WORDS_BIGENDIAN
    return (u64(mem[addr + 7]) << 56 | u64(mem[addr + 6]) << 48 |
@@ -92,15 +101,25 @@ static INLINE u64 T1ReadQuad(u8* const mem, const u32 addr)
            u64(mem[addr + 3]) << 24 | u64(mem[addr + 2]) << 16 |
            u64(mem[addr + 1]) << 8  | u64(mem[addr    ]));
 #else
-   return *((u64 *) (mem + addr));
+   return *((u64 *) (mem + (addr)));
 #endif
-}
+}*/
 
-static INLINE void T1WriteByte(u8* const mem, const u32 addr, const u8 val)
+#define T1ReadQuad(mem, addr) \
+   (*((u64 *) (mem + (addr))))
+
+/*static INLINE void T1WriteByte(u8* const mem, const u32 addr, const u8 val)
 {
    mem[addr] = val;
-}
+}*/
 
+#define T1WriteByte(mem, addr, val) \
+   do { \
+      ((u8*)mem)[addr] = val; \
+   } while(0)
+
+
+/*
 static INLINE void T1WriteWord(u8* const mem, const u32 addr, const u16 val)
 {
 #ifdef WORDS_BIGENDIAN
@@ -108,22 +127,16 @@ static INLINE void T1WriteWord(u8* const mem, const u32 addr, const u16 val)
    mem[addr] = val & 0xFF;
 #else
 
-	//HCF PRUEBA
-	//mem[addr + 1] = (u8)(val >> 8);
-   //mem[addr] = (u8)(val & 0xFF);
-	/*
-	mem[addr] = (u8)(val >> 8);
-   mem[addr + 1] = (u8)(val & 0xFF);
-	*/
-	/*
-	mem[addr] = val >> 8;
-   mem[addr + 1] = val & 0xFF;
-   */
-   *((u16 *) (mem + addr)) = val;
+   *((u16 *) (mem + (addr))) = val;
 #endif
-}
+}*/
 
-static INLINE void T1WriteLong(u8* const mem, const u32 addr, const u32 val)
+#define T1WriteWord(mem, addr, val) \
+   do { \
+      *((u16 *) (mem + (addr))) = val; \
+   } while(0)
+
+/*static INLINE void T1WriteLong(u8* const mem, const u32 addr, const u32 val)
 {
 #ifdef WORDS_BIGENDIAN
    mem[addr + 3] = val >> 24;
@@ -132,30 +145,17 @@ static INLINE void T1WriteLong(u8* const mem, const u32 addr, const u32 val)
    mem[addr] = val & 0xFF;
 #else
 
-//HCF PRUEBA
-	/*mem[addr + 3] = (u8)(val >> 24);
-   mem[addr + 2] = (u8)((val >> 16) & 0xFF);
-   mem[addr + 1] = (u8)((val >> 8) & 0xFF);
-   mem[addr] = (u8)(val & 0xFF);
-	/*
-	mem[addr] = (u8)(val >> 24);
-   mem[addr + 1] = (u8)((val >> 16) & 0xFF);
-   mem[addr + 2] = (u8)((val >> 8) & 0xFF);
-   mem[addr + 3] = (u8)(val & 0xFF);
-	*/
-	/*
-   mem[addr] = val >> 24;
-   mem[addr + 1] = (val >> 16) & 0xFF;
-   mem[addr + 2] = (val >> 8) & 0xFF;
-   mem[addr + 3] = val & 0xFF;
-	*/
-    *((u32 *) (mem + addr)) = val;
-
-
+    *((u32 *) (mem + (addr))) = val;
 #endif
-}
+}*/
 
-static INLINE void T1WriteQuad(u8* const mem, const u32 addr, const u64 val)
+#define T1WriteLong(mem, addr, val) \
+   do { \
+      *((u32 *) (mem + (addr))) = val; \
+   } while(0)
+
+
+/*static INLINE void T1WriteQuad(u8* const mem, const u32 addr, const u64 val)
 {
 #ifdef WORDS_BIGENDIAN
 	mem[addr + 7] = (val >> 56);
@@ -167,9 +167,14 @@ static INLINE void T1WriteQuad(u8* const mem, const u32 addr, const u64 val)
     mem[addr + 1] = (val >> 8) & 0xFF;
     mem[addr] = val & 0xFF;
 #else
-	*((u64 *) (mem + addr)) = val;
+	*((u64 *) (mem + (addr))) = val;
 #endif
-}
+}*/
+
+#define T1WriteQuad(mem, addr, val) \
+   do { \
+      *((u64 *) (mem + (addr))) = val; \
+   } while(0)
 
 //static INLINE u8 T2ReadByte(u8* const  mem, const u32 addr)
 //{
@@ -181,18 +186,21 @@ static INLINE void T1WriteQuad(u8* const mem, const u32 addr, const u64 val)
 //}
 //
 
-static INLINE u16 HostReadWord(u8* const mem, const u32 addr)
+/*static INLINE u16 HostReadWord(u8* const mem, const u32 addr)
 {
-   return *((u16 *) (mem + addr));
-}
+   return *((u16 *) (mem + (addr)));
+}*/
+
+#define HostReadWord(mem, addr) \
+   (*((u16 *) (mem + (addr))))
 
 //
 //static INLINE u32 T2ReadLong(u8* const mem, const u32 addr)
 //{
 //#ifdef WORDS_BIGENDIAN
-//   return *((u16 *) (mem + addr + 2)) << 16 | *((u16 *) (mem + addr));
+//   return *((u16 *) (mem + (addr) + 2)) << 16 | *((u16 *) (mem + (addr)));
 //#else
-//   return *((u32 *) (mem + addr));
+//   return *((u32 *) (mem + (addr)));
 //#endif
 //}
 //
@@ -205,27 +213,47 @@ static INLINE u16 HostReadWord(u8* const mem, const u32 addr)
 //#endif
 //}
 
+/*
 static INLINE void HostWriteWord(u8* const mem, const u32 addr, const u16 val)
 {
-   *((u16 *) (mem + addr)) = val;
+   *((u16 *) (mem + (addr))) = val;
 }
+*/
 
+#define HostWriteWord(mem, addr, val) \
+   do { \
+      *((u16 *) (mem + (addr))) = val; \
+   } while(0)
 
+/*
 static INLINE void HostWriteLong(u8* const mem, const u32 addr, const u32 val)
 {
-   *((u32 *) (mem + addr)) = val;
+   *((u32 *) (mem + (addr))) = val;
 }
+*/
 
+#define HostWriteLong(mem, addr, val) \
+   do { \
+      *((u32 *) (mem + (addr))) = val; \
+   } while(0)
+
+/*
 static INLINE void HostWriteTwoWords(u8* const mem, const u32 addr, const u32 val)
 {
 #ifdef WORDS_BIGENDIAN
-   *((u16 *) (mem + addr + 2)) = val >> 16;
-   *((u16 *) (mem + addr)) = val & 0xFFFF;
+   *((u16 *) (mem + (addr) + 2)) = val >> 16;
+   *((u16 *) (mem + (addr))) = val & 0xFFFF;
 #else
-   *((u32 *) (mem + addr)) = val;
+   *((u32 *) (mem + (addr))) = val;
 #endif
 }
+*/
 
-#undef WORDS_BIGENDIAN
+#define HostWriteTwoWords(mem, addr, val) \
+   do { \
+      *((u32 *) (mem + (addr))) = val; \
+   } while(0)
+
+//#undef WORDS_BIGENDIAN
 
 #endif

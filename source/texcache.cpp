@@ -40,7 +40,7 @@ using std::max;
 
 //only dump this from ogl renderer. for now, softrasterizer creates things in an incompatible pixel format
 //#define DEBUG_DUMP_TEXTURE
-extern void* memcpy_vfpu( void* dst, void* src, unsigned int size );
+
 #define CONVERT(color,alpha) ((TEXFORMAT == TexFormat_32bpp)?(RGB15TO32(color,alpha)):RGB15TO6665(color,alpha))
 
 //This class represents a number of regions of memory which should be viewed as contiguous
@@ -73,8 +73,13 @@ public:
 		for(int i=0;i<numItems;i++)
 		{
 			Item &item = items[i];
+
+			if (!item.ptr) 
+				continue;
+
 			int todo = min((int)item.len,size);
 			size -= todo;
+			
 			int temp = ::memcmp(item.ptr,((u8*)buf2)+item.ofs,todo);
 			if(temp) return temp;
 			if(size == 0) break;
@@ -95,10 +100,14 @@ public:
 		for(int i=0;i<numItems;i++)
 		{
 			Item item = items[i];
+
+			if (!item.ptr) 
+				continue;
+
 			int todo = min((int)item.len,size);
 			size -= todo;
 			done += todo;
-			memcpy_vfpu(bufptr,item.ptr,todo);
+			memcpy(bufptr,item.ptr,todo);
 			bufptr += todo;
 			if(size==0) return done;
 		}
@@ -222,7 +231,7 @@ public:
 	
 
 	//static const u32 kMaxCacheSize = 6*512*1024; //2MB
-	static const u32 kMaxCacheSize = 6*1024*1024; 
+	static const u32 kMaxCacheSize = 8*1024*1024; 
 	 // static const u32 kMaxCacheSize = 16*1024*1024; 
 	
 
@@ -400,7 +409,7 @@ public:
 		//dump palette data for cache keying
 		if(palSize)
 		{
-			memcpy_vfpu(newitem->dump.palette, pal, palSize*2);
+			memcpy(newitem->dump.palette, pal, palSize*2);
 		}
 
 		//dump texture and 4x4 index data for cache keying
@@ -693,7 +702,7 @@ public:
 		return newitem;
 	} //scan()
 
-	static const int PALETTE_DUMP_SIZE = 96*1024;//64 + 32
+	static const int PALETTE_DUMP_SIZE = (64+16+16)*1024;
 	u8 paletteDump[PALETTE_DUMP_SIZE];
 
 	void invalidate()

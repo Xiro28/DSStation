@@ -51,18 +51,27 @@ void IPC_FIFOsend(u8 proc, u32 val)
 {
 	if (IPCFIFOCNT_src & IPCFIFOCNT_FIFOENABLE){
 
+		const auto fifo_len = IPCFIFO_src.Level();
+
 		if (IPCFIFO_src.IsFull()){
 			IPCFIFOCNT_src |= 0x4000;
 			return;
 		}else
 		{
-			bool wasempty = IPCFIFO_src.IsEmpty();
 			IPCFIFO_src.Write(val);
 
+			if (fifo_len == 0) {
+				IPCFIFOCNT_src &= ~IPCFIFOCNT_SENDEMPTY;
+			} else if (fifo_len == 15) {
+				IPCFIFOCNT_src |= IPCFIFOCNT_SENDFULL;
+			}
+
+
+
+			//if ((IPCFIFOCNT_dst & 0x0400) && wasempty)
+			//	NDS_makeIrq(proc^1, IRQ_BIT_IPCFIFO_RECVNONEMPTY);
+
 			OnIPCRequest();
-			
-			if ((IPCFIFOCNT_dst & 0x0400) && wasempty)
-				NDS_makeIrq(proc^1, IRQ_BIT_IPCFIFO_RECVNONEMPTY);
 		}
 		
 		NDS_Reschedule();
@@ -71,7 +80,7 @@ void IPC_FIFOsend(u8 proc, u32 val)
 
 u32 IPC_FIFOrecv(u8 proc)
 {
-	if (IPCFIFOCNT_src & 0x8000)
+	 if (IPCFIFOCNT_src & 0x8000)
         {
             u32 ret;
             if (IPCFIFO_dst.IsEmpty())
@@ -97,7 +106,8 @@ u32 IPC_FIFOrecv(u8 proc)
 
 void IPC_FIFOcnt(u8 proc, u16 val)
 {
-	if (val & 0x0008)
+	
+	if (val & IPCFIFOCNT_SENDCLEAR)
 		IPCFIFO_src.Clear();
 	if ((val & 0x0004) && (!(IPCFIFOCNT_src & 0x0004)) && IPCFIFO_src.IsEmpty())
 		NDS_makeIrq(proc, IRQ_BIT_IPCFIFO_SENDEMPTY);
@@ -113,10 +123,22 @@ void IPC_FIFOcnt(u8 proc, u16 val)
 u32 IPC_FIFOgetCnt(u8 proc)
 {
 	u16 val = IPCFIFOCNT_src;
-	if (IPCFIFO_src.IsEmpty())     val |= 0x0001;
-	else if (IPCFIFO_src.IsFull()) val |= 0x0002;
-	if (IPCFIFO_dst.IsEmpty())     val |= 0x0100;
-	else if (IPCFIFO_dst.IsFull()) val |= 0x0200;
+
+	val &= ~IPCFIFOCNT_SENDEMPTY;
+	val &= ~IPCFIFOCNT_SENDFULL;
+
+	val &= ~IPCFIFOCNT_RECVEMPTY;
+	val &= ~IPCFIFOCNT_RECVFULL;
+
+
+	if (IPCFIFO_src.IsEmpty())     val |= IPCFIFOCNT_SENDEMPTY;
+	else if (IPCFIFO_src.Level() == 16) val |= IPCFIFOCNT_SENDFULL;
+
+	val |= IPCFIFOCNT_SENDEMPTY;
+
+	if (IPCFIFO_dst.IsEmpty())     val |= IPCFIFOCNT_RECVEMPTY;
+	else if (IPCFIFO_dst.Level() == 16) val |= IPCFIFOCNT_RECVFULL;
+
 	return val;
 }
 
@@ -145,7 +167,7 @@ static void GXF_FIFO_handleEvents()
 	bool low = gxFIFO.size <= 127;
 	bool lowchange = MMU_new.gxstat.fifo_low ^ low;
 	MMU_new.gxstat.fifo_low = low;
-	if(low) triggerDma(EDMAMode_GXFifo);
+	if(low) triggerDma<EDMAMode_GXFifo>();
 
 	bool empty = gxFIFO.size == 0;
 	bool emptychange = MMU_new.gxstat.fifo_empty ^ empty;

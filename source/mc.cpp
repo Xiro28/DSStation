@@ -985,6 +985,7 @@ void BackupDevice::ensureReal(u32 addr, u8 val, int inReset, EMUFILE *fpOut)
 	/*if(inReset)
 		vdResetEmulator();
 	else*/
+	if (fpMC)
 		fpMC->fseek(addr-1, SEEK_SET);
 #endif
 

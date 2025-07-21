@@ -95,14 +95,24 @@ enum EDMADestinationUpdate
 	EDMADestinationUpdate_IncrementReload = 3,
 };
 
-//TODO
-//n.b. this may be a bad idea, for complex registers like the dma control register.
-//we need to know exactly what part was written to, instead of assuming all 32bits were written.
-class TRegister_32
+struct TGXSTAT
 {
-public:
-	virtual u32 read32() = 0;
-	virtual void write32(const u32 val) = 0;
+	TGXSTAT() {
+		gxfifo_irq = se = tr = tb = sb = 0;
+		fifo_empty = true;
+		fifo_low = false;
+	}
+
+	bool fifo_empty, fifo_low;
+
+	u8 tb; //test busy
+	u8 tr; //test result
+	u8 se; //stack error
+	u8 sb; //stack busy
+	u8 gxfifo_irq; //irq configuration
+
+	u32 read32();
+	void write32(const u32 val);
 
 	template<u32 size>
 	void write(const u32 adr, const u32 val) { 
@@ -131,32 +141,11 @@ public:
 			else return (read32()>>(offset<<3))&0xFFFF;
 		}
 	}
-};
-
-struct TGXSTAT : public TRegister_32
-{
-	TGXSTAT() {
-		gxfifo_irq = se = tr = tb = sb = 0;
-		fifo_empty = true;
-		fifo_low = false;
-	}
-
-	bool fifo_empty, fifo_low;
-
-	u8 tb; //test busy
-	u8 tr; //test result
-	u8 se; //stack error
-	u8 sb; //stack busy
-	u8 gxfifo_irq; //irq configuration
-
-	virtual u32 read32();
-	virtual void write32(const u32 val);
 
 	void savestate(EMUFILE *f);
 	bool loadstate(EMUFILE *f);
 };
 
-void triggerDma(EDMAMode mode);
 
 class DivController
 {
@@ -230,7 +219,19 @@ public:
 	void doPause();
 	void doStop();
 	void doSchedule();
-	void tryTrigger(EDMAMode mode);
+
+	template <EDMAMode mode>
+	void tryTrigger()
+	{
+		if(startmode != mode) return;
+		if(!enable) return;
+
+		//hmm dont trigger it if its already running! 
+		//but paused things need triggers to continue
+		if(running && !paused) return; 
+		triggered = TRUE;
+		doSchedule();
+	}
 
 	DmaController() :
 		enable(0), irq(0), repeatMode(0), _startmode(0),
@@ -252,12 +253,9 @@ public:
 		sad.controller = this;
 		dad.controller = this;
 		ctrl.controller = this;
-		regs[0] = &sad;
-		regs[1] = &dad;
-		regs[2] = &ctrl;
 	}
 
-	class AddressRegister : public TRegister_32 {
+	class AddressRegister{
 	public:
 		//we pass in a pointer to the controller here so we can alert it if anything changes
 		DmaController* controller;
@@ -265,30 +263,86 @@ public:
 		AddressRegister(u32* _ptr)
 			: ptr(_ptr)
 		{}
-		virtual u32 read32() { 
+		u32 read32() { 
 			return *ptr;
 		}
-		virtual void write32(const u32 val) {
+		void write32(const u32 val) {
 			*ptr = val;
+		}
+
+		template<u32 size>
+		void write(const u32 adr, const u32 val) { 
+			if(size==32) write32(val);
+			else {
+				const u32 offset = adr&3;
+				if(size==8) {
+					//printf("WARNING! 8BIT DMA ACCESS\n"); 
+					u32 mask = 0xFF<<(offset<<3);
+					write32((read32()&~mask)|(val<<(offset<<3)));
+				}
+				else if(size==16) {
+					u32 mask = 0xFFFF<<(offset<<3);
+					write32((read32()&~mask)|(val<<(offset<<3)));
+				}
+			}
+		}
+
+		template<u32 size>
+		u32 read(const u32 adr)
+		{
+			if(size==32) return read32();
+			else {
+				const u32 offset = adr&3;
+				if(size==8) { /*printf("WARNING! 8BIT DMA ACCESS\n");*/ return (read32()>>(offset<<3))&0xFF; }
+				else return (read32()>>(offset<<3))&0xFFFF;
+			}
 		}
 	};
 
-	class ControlRegister : public TRegister_32 {
+	// TODO use  Use a CRTP pattern to avoid code duplication
+	class ControlRegister {
 	public:
 		//we pass in a pointer to the controller here so we can alert it if anything changes
 		DmaController* controller;
 		ControlRegister() {}
-		virtual u32 read32() { 
+		u32 read32() { 
 			return controller->read32();
 		}
-		virtual void write32(const u32 val) {
+		void write32(const u32 val){
 			return controller->write32(val);
+		}
+
+		template<u32 size>
+		void write(const u32 adr, const u32 val) { 
+			if(size==32) write32(val);
+			else {
+				const u32 offset = adr&3;
+				if(size==8) {
+					//printf("WARNING! 8BIT DMA ACCESS\n"); 
+					u32 mask = 0xFF<<(offset<<3);
+					write32((read32()&~mask)|(val<<(offset<<3)));
+				}
+				else if(size==16) {
+					u32 mask = 0xFFFF<<(offset<<3);
+					write32((read32()&~mask)|(val<<(offset<<3)));
+				}
+			}
+		}
+
+		template<u32 size>
+		u32 read(const u32 adr)
+		{
+			if(size==32) return read32();
+			else {
+				const u32 offset = adr&3;
+				if(size==8) { /*printf("WARNING! 8BIT DMA ACCESS\n");*/ return (read32()>>(offset<<3))&0xFF; }
+				else return (read32()>>(offset<<3))&0xFFFF;
+			}
 		}
 	};
 
 	AddressRegister sad, dad;
 	ControlRegister ctrl;
-	TRegister_32* regs[3];
 
 	void write32(const u32 val);
 	u32 read32();
@@ -567,18 +621,57 @@ struct MMU_struct_new
 	template <u32 size>
     inline void write_dma(DmaRegister adr, u32 val) {
         const auto info = computeDmaAddressInfo(adr);
-        dma[ARM9][info.chan].regs[info.regnum]->write<size>(info.offset, val);
+		switch (info.regnum){
+			case 0:
+				dma[ARM9][info.chan].sad.write<size>(info.offset, val);
+			break;
+			
+			case 1:
+				dma[ARM9][info.chan].dad.write<size>(info.offset, val);
+			break;
+
+			case 2:
+				dma[ARM9][info.chan].ctrl.write<size>(info.offset, val);
+			break;
+		}
     }
 
     template <u32 size>
     inline u32 read_dma(DmaRegister adr) {
         const auto info = computeDmaAddressInfo(adr);
-        return dma[ARM9][info.chan].regs[info.regnum]->read<size>(info.offset);
+
+		switch (info.regnum){
+			case 0:
+				return dma[ARM9][info.chan].sad.read<size>(info.offset);
+			
+			case 1:
+				return dma[ARM9][info.chan].dad.read<size>(info.offset);
+
+			case 2:
+				return dma[ARM9][info.chan].ctrl.read<size>(info.offset);
+		}
+
+		return 0;
     }
 };
 
 extern MMU_struct &MMU;
 extern MMU_struct_new MMU_new;
+
+
+template <EDMAMode mode>
+void triggerDma()
+{
+	MACRODO4(0, {
+		const int j=X;
+		MMU_new.dma[0][j].tryTrigger<mode>();
+	});
+	
+	/*MACRODO4(0, {
+		const int j=X;
+		MMU_new.dma[1][j].tryTrigger(mode);
+	});*/
+}
 
 
 struct armcpu_memory_iface
@@ -1089,5 +1182,6 @@ template<int PROCNUM, MMU_ACCESS_TYPE AT>
 FORCEINLINE void _MMU_write32(u32 addr, u32 val) { _MMU_write32(PROCNUM, AT, addr, val); }
 
 void FASTCALL MMU_DumpMemBlock(u8 proc, u32 address, u32 size, u8 *buffer);
+
 
 #endif

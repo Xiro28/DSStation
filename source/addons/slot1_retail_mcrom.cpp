@@ -96,12 +96,14 @@ public:
 		rom.loadstate(is);
 	}
 
-private:
+	private:
 
 	u32 slot1client_read_GCDATAIN(eSlot1Operation operation)
 	{
 		return rom.read();
 	}
+
+
 };
 
 ISlot1Interface* construct_Slot1_Retail_MCROM() { return new Slot1_Retail_MCROM(); }

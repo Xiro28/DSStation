@@ -92,8 +92,6 @@ static u32 JIT_MASK[32] = {
       /* FX*/  DUP2(0x00007FFF)
 };
 
-// create hashmap for fast lookup of code blocks
-std::unordered_map<uint32_t, uint32_t> generated_blocks;
 
 static void init_jit_mem()
 {
@@ -479,6 +477,23 @@ inline bool isMainMemory(u32 addr)
    return ((addr & 0x0F000000) == 0x02000000) && !((addr&(~0x3FFF)) == MMU.DTCMRegion);
 }
 
+inline bool is3DCMD(u32 addr)
+{
+   addr = addr >> 4;
+   return (addr >= 0x400044 && addr <= 0x40005C);
+}
+
+inline bool is3DFIFO(u32 addr)
+{
+   addr = addr >> 4;
+   return (addr >= 0x400040 && addr <= 0x400043);
+}
+
+inline bool isDMA(u32 addr)
+{
+   return MMU_new.is_dma(addr);
+}
+
 #define ARM_MEM_OP_DEF2(T, Q) \
    static const DynaCompiler ARM_OP_##T##_M_LSL_##Q = 0; \
    static const DynaCompiler ARM_OP_##T##_P_LSL_##Q = 0; \
@@ -505,23 +520,33 @@ ARM_MEM_OP_DEF(LDRB);
 
 #define GEN_ARM_STR_OP_FUNC(Name, MODE, VAL)                                  \
 static INSTR_R Name(uint32_t pc, const u32 i){             \
+   if (REG_POS(i, 16)==15 || REG_POS(i, 12)==15)                                                   \
+      return INTERPRET;                                                  \
    currentBlock.WriteOP = true; \
-   return INTERPRET; \
-   interpreted_cycles += 2; \
+   u32 val = get_addr(_ARMPROC.R[REG_POS(i,16)], VAL, MODE, i); \
+   if (is3DCMD(val)){\
+      interpreted_cycles += 8; \
+      currentBlock.addOP(OP_3D_CMD, pc, -1, REG_POS(i, 12), -1, val, PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1, EXTFL_NONE);\
+   }else if (is3DFIFO(val)){\
+      interpreted_cycles += 8; \
+      currentBlock.addOP(OP_3D_FIFO, pc, -1, REG_POS(i, 12), -1, val, PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1, EXTFL_NONE);\
+   }else if (isDMA(val)){\
+      return INTERPRET;      \
+      interpreted_cycles += 4; \
+      currentBlock.addOP(OP_DMA, pc, -1, REG_POS(i, 12), REG_POS(i,16), VAL, (opType)MODE, instr_is_conditional(i) ? CONDITION(i) : -1, EXTFL_NONE);\
+   }else{\
+      interpreted_cycles += 2; \
     currentBlock.addOP(OP_STR, pc, REG_POS(i,16), REG_POS(i,12), REG_POS(i, 0),         \
          VAL,                            \
          (opType)MODE,                                                     \
          instr_is_conditional(i) ? CONDITION(i) : -1,                        \
-         EXTFL_NONE);                                                       \
+         isMainMemory(val) ? EXTFL_DIRECTMEMACCESS : EXTFL_NONE);                                                       \
+   }\
     return DYNAREC;                                                          \
 }
 
-#define LSR_IMM \
-	u32 shift_op = ((i>>7)&0x1F); \
-	if(shift_op!=0) \
-		shift_op = cpu->R[REG_POS(i,0)]>>shift_op;
 
-u32 get_addr(u32 addr, u32 shift_op, u32 type, u32 i){
+u32 get_addr(u32 addr, s32 shift_op, u32 type, u32 i){
    u32 sign = 1;
 
    if ((type & 0xfff) == PRE_OP_IMM_POST_M || (type & 0xfff) == PRE_OP_IMM_POST_P) return addr;
@@ -542,14 +567,15 @@ u32 get_addr(u32 addr, u32 shift_op, u32 type, u32 i){
 		      return addr + (sign * (u32)((s32)_ARMPROC.R[REG_POS(i,0)]>>shift_op));
       }
       case PRE_OP_ROR_IMM: return (shift_op != 0) ? addr + (sign * shift_op) : 0;
+      default:
+         return 0;
    }
 }
 
 #define GEN_ARM_LDR_OP_FUNC(Name, MODE, VAL)                                    \
 static INSTR_R Name(uint32_t pc, const u32 i){             \
-    if (REG_POS(i,12)==15)                                                   \
-        return INTERPRET;                                                  \
-        return INTERPRET; \
+    if (REG_POS(i,12)==15 ||  REG_POS(i,16) == 15)                                                   \
+        return INTERPRET;          \
    interpreted_cycles += 2; \
    u32 val = get_addr(_ARMPROC.R[REG_POS(i,16)], VAL, MODE, i); \
     currentBlock.addOP(OP_LDR, pc, REG_POS(i,12), REG_POS(i,16), REG_POS(i, 0),         \
@@ -613,9 +639,10 @@ gen_ldr()
 static INSTR_R NAME(uint32_t pc, const u32 i) \
 { \
     if (PRE_OP == PRE_OP_IMM || PRE_OP == PRE_OP_IMM_PRE_P || PRE_OP == PRE_OP_IMM_PRE_M || PRE_OP == PRE_OP_IMM_POST_P || PRE_OP == PRE_OP_IMM_POST_M) { \
-        currentBlock.addOP(OP_TYPE, pc, REG_POS(i, 12), REG_POS(i, 16), -1, \
+      u32 val = get_addr(_ARMPROC.R[REG_POS(i,16)], IMM, PRE_OP, i); \
+      currentBlock.addOP(OP_TYPE, pc, REG_POS(i, 12), REG_POS(i, 16), -1, \
             IMM, PRE_OP, \
-            instr_is_conditional(i) ? CONDITION(i) : -1, FLAG); \
+            instr_is_conditional(i) ? CONDITION(i) : -1, /*isMainMemory(val) ? EXTFL_DIRECTMEMACCESS :*/ FLAG); \
         return DYNAREC; \
     } else { \
         return INTERPRET; \
@@ -626,15 +653,16 @@ static INSTR_R NAME(uint32_t pc, const u32 i) \
 static INSTR_R NAME(uint32_t pc, const u32 i) \
 { \
    currentBlock.WriteOP = true; \
-    if (PRE_OP == PRE_OP_IMM || PRE_OP == PRE_OP_IMM_PRE_P || PRE_OP == PRE_OP_IMM_PRE_M || PRE_OP == PRE_OP_IMM_POST_P || PRE_OP == PRE_OP_IMM_POST_M) { \
-        currentBlock.addOP(OP_TYPE, pc, REG_POS(i,  16), REG_POS(i, 12), -1, \
+   if (PRE_OP == PRE_OP_IMM || PRE_OP == PRE_OP_IMM_PRE_P || PRE_OP == PRE_OP_IMM_PRE_M || PRE_OP == PRE_OP_IMM_POST_P || PRE_OP == PRE_OP_IMM_POST_M) {  \
+      u32 val = get_addr(_ARMPROC.R[REG_POS(i,16)], IMM, PRE_OP, i); \
+      currentBlock.addOP(OP_TYPE, pc, REG_POS(i,  16), REG_POS(i, 12), -1, \
             IMM, PRE_OP, \
-            instr_is_conditional(i) ? CONDITION(i) : -1, FLAG); \
+            instr_is_conditional(i) ? CONDITION(i) : -1, /*isMainMemory(val) ? EXTFL_DIRECTMEMACCESS :*/ FLAG); \
             interpreted_cycles += 2; \
         return DYNAREC; \
     } else { \
-        return INTERPRET; \
-    } \
+      return INTERPRET; \
+  } \
 }
 
 
@@ -682,12 +710,13 @@ DEFINE_ARM_OP_LDR_HB(OP_LDRSH, (((i >> 4) & 0xF0) + (i & 0xF)), EXTFL_NONE)
 
 static INSTR_R ARM_OP_B(uint32_t pc, const u32 i)
 {
-   return INTERPRET;
-
-	if(instr_is_conditional(i) || CONDITION(i)==0xF || _ARMPROC.CPSR.bits.T == 1)
+   
+   if(CONDITION(i)==0xF || instr_is_conditional(i) || NDS_ARM9.CPSR.bits.T == 1)
 	{
-		return INTERPRET;
+      return INTERPRET;
 	}
+
+   currentBlock.JumpOP = true;
 
 	u32 off = SIGNEXTEND_24(i);
    
@@ -695,12 +724,31 @@ static INSTR_R ARM_OP_B(uint32_t pc, const u32 i)
       printf("WARNING: B to self\n");
 
    
-   currentBlock.addOP(OP_BXC, pc, 15, -1, -1, (off<<2), PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
+   currentBlock.addOP(OP_BC, pc, -1, -1, -1, (off<<2), PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
    
-   return DYNAREC_BRANCH;
+   return DYNAREC;
 }
 
-#define ARM_OP_BL 0
+
+static INSTR_R ARM_OP_BL(uint32_t pc, const u32 i)
+{
+   
+   return INTERPRET;
+   if(CONDITION(i)==0xF || instr_is_conditional(i) || NDS_ARM9.CPSR.bits.T == 1)
+	{
+	}
+   currentBlock.JumpOP = true;
+
+   u32 off = SIGNEXTEND_24(i);
+   
+   if (currentBlock.branch_addr == currentBlock.start_addr) 
+      printf("WARNING: B to self\n");
+
+   
+   currentBlock.addOP(OP_BLC, pc, -1, -1, -1, (off<<2), PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
+   
+   return DYNAREC;
+}
 
 //-----------------------------------------------------------------------------
 //   MRS / MSR
@@ -766,8 +814,15 @@ static INSTR_R ARM_OP_BX(uint32_t pc, const u32 i){
 
    /*currentBlock.addOP(OP_BXC, pc, -1, REG_POS(i, 0), -1, -1, PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
    return DYNAREC_BRANCH;*/
-
+   currentBlock.JumpOP = true;
    currentBlock.addOP(OP_BXC, pc, -1, REG_POS(i, 0), -1, -1, PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
+   return DYNAREC;
+}
+
+static INSTR_R ARM_OP_BLX_REG(uint32_t pc, const u32 i){
+   return INTERPRET;
+   currentBlock.JumpOP = true;
+   currentBlock.addOP(OP_BXRC, pc, -1, REG_POS(i, 0), -1, -1, PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
    return DYNAREC;
 }
 
@@ -789,7 +844,7 @@ static INSTR_R ARM_OP_STMIA(uint32_t pc, const u32 i){
 #define ARM_OP_LDRD_STRD_OFFSET_PRE_INDEX 0
 #define ARM_OP_MSR_CPSR 0
 //#define ARM_OP_BX 0
-#define ARM_OP_BLX_REG 0
+//#define ARM_OP_BLX_REG 0
 #define ARM_OP_BKPT 0
 #define ARM_OP_MSR_SPSR 0
 #define ARM_OP_STREX 0
@@ -1051,7 +1106,9 @@ static INSTR_R THUMB_OP_B_COND(uint32_t pc, const u32 i)
 
 static INSTR_R THUMB_OP_B_UNCOND(uint32_t pc, const u32 i)
 {
-   return INTERPRET;
+   #define SIGNEEXT_IMM11(i)	(((i)&0x7FF) | (BIT10(i) * 0xFFFFF800))
+   currentBlock.addOP(OP_BXC, pc, -1, -1, -1, (SIGNEEXT_IMM11(i)<<1), PRE_OP_IMM, EXTFL_NOFLAGS);
+   return DYNAREC;
 }
 
 static INSTR_R THUMB_OP_ADJUST_P_SP(uint32_t pc, const u32 i)
@@ -1293,6 +1350,7 @@ static u32 FASTCALL OP_DECODE()
 			cycles = 1;
 	}
 	ARMPROC.instruct_adr = ARMPROC.next_instruction;
+   ARMPROC.idle_loop = false;
 	return cycles;
 }
 
@@ -1315,42 +1373,24 @@ bool instr_does_prefetch(u32 opcode)
 //   Compiler
 //-----------------------------------------------------------------------------
 
-
+bool first_time = true;
 template<int PROCNUM>
-static u32 compile_basicblock()
+void compile_basicblock ()
 {
    uint32_t opcode = 0;
+
    void* code_ptr = emit_GetPtr();
 
-   // insert here the value if we are using a idle block
-   // we're going to use it when taking the code from memory
-   // since we don't save the block with the necessary info
-      
-   const bool isIdle = currentBlock.IsIdleLoop(thumb);
+   const bool isIdle = currentBlock.isIdleLoop(thumb);
 
-   emit_mpush(9,
-            reg_gpr+psp_s0,
-            reg_gpr+psp_s1,
-            reg_gpr+psp_s2,
-            reg_gpr+psp_s3,
-            reg_gpr+psp_s4,
-				reg_gpr+psp_gp,
-				reg_gpr+psp_k0,
-				reg_gpr+psp_fp,
-				reg_gpr+psp_ra); 
+   emit_mpush(1, reg_gpr+psp_ra); 
 
    //StartCodeDump();
 
-   emit_li(psp_k0,((u32)&ARMPROC), 2);
-   //emit_move(psp_k1, psp_zero);
-
-
    if (thumb){
       currentBlock.emitThumbBlock<PROCNUM>();
-         //printf("idle loop thumb\n");
    }else{
       currentBlock.emitArmBlock<PROCNUM>();
-         // printf("idle loop arm\n");
    }
 
 
@@ -1360,35 +1400,23 @@ static u32 compile_basicblock()
       emit_sw(psp_at, RCPU, _instr_adr);
    }
 
-   const float multiplier = isIdle ? 1.5f : 1.1f;
    if (currentBlock.JumpOP)
    {
-      emit_addiu(psp_v0, psp_v0, interpreted_cycles * multiplier);
+      emit_addiu(psp_v0, psp_v0, interpreted_cycles);
    }else{
-      emit_addiu(psp_v0, psp_zero, interpreted_cycles * multiplier);
+      emit_addiu(psp_v0, psp_zero, interpreted_cycles);
    }
 
-   emit_mpop(9,
-            reg_gpr+psp_s0,
-            reg_gpr+psp_s1,
-            reg_gpr+psp_s2,
-            reg_gpr+psp_s3,
-            reg_gpr+psp_s4,
-				reg_gpr+psp_gp,
-				reg_gpr+psp_k0,
-				reg_gpr+psp_fp,
-				reg_gpr+psp_ra);
-   
+   emit_mpop(1, reg_gpr+psp_ra); 
+ 
    emit_jra();
    emit_movi(psp_v1,  isIdle ? 1 : 0);
-
-   // Align the code to 64 bytes
-   while(emit_getCurrAdr() & 0x3F) emit_nop();
    
    make_address_range_executable((u32)code_ptr, (u32)emit_GetPtr());
    JIT_COMPILED_FUNC(base_adr, PROCNUM) = (uintptr_t)code_ptr;
 
-   return interpreted_cycles;
+   // Align the code to 16 bytes
+   while(emit_getCurrAdr() & 0xF) emit_nop();
 }
 
 
@@ -1472,7 +1500,7 @@ void build_ArmBasicblock(){
       DynaCompiler fc = arm_instruction_compilers[INSTRUCTION_INDEX(op)];
       INSTR_R res = fc == 0 ? INTERPRET : fc(pc,op);
 
-      has_ended = (instr_is_branch(op) /*&& res == INTERPRET*/) || (opnum >= 16);
+      has_ended = (instr_is_branch(op) /*&& res == INTERPRET*/) || (opnum >= 64);
 
       currentBlock.WriteOP = currentBlock.WriteOP || isARMWritingInstruction(op);
       currentBlock.MCROP = currentBlock.MCROP || is_mcr_mrc(op);
@@ -1512,6 +1540,8 @@ void build_ThumbBasicblock(){
 
    const u32 isize = 2;
    const uint32_t imask = 0xFFFFFFFE;
+
+   
 
    for (uint32_t i = 0, has_ended = 0; has_ended == 0; i ++, pc += isize){
 
@@ -1558,6 +1588,8 @@ void checkAndDeleteLinkedBLock(u32 addr){
 void test_jit_func(){
    const int PROCNUM = 1;
 
+   return;
+
    printf("Start test\n");
 
    // store R0 R1 R2
@@ -1584,7 +1616,32 @@ void test_jit_func(){
    compile_basicblock<PROCNUM>();
 
    ArmOpCompiled f = (ArmOpCompiled)JIT_COMPILED_FUNC(base_adr, 1);
+
+   asm volatile(
+				"addiu $sp, $sp, -28\n"
+				"sw $s0, 24($sp)\n"
+				"sw $s1, 20($sp)\n"
+				"sw $s2, 16($sp)\n"
+				"sw $s3, 12($sp)\n"
+				"sw $s4, 8($sp)\n"
+				"sw $gp, 4($sp)\n"
+				"sw $fp, 0($sp)\n"
+				"move $k0, %0\n\t"   // Move the address of ARMPROC into $k0
+				:
+				: "r" (&ARMPROC)
+			);
    f();
+
+   asm volatile(
+				"lw $s0, 24($sp)\n"
+				"lw $s1, 20($sp)\n"
+				"lw $s2, 16($sp)\n"
+				"lw $s3, 12($sp)\n"
+				"lw $s4, 8($sp)\n"
+				"lw $gp, 4($sp)\n"
+				"lw $fp, 0($sp)\n"
+				"addiu $sp, $sp, 28\n"
+			);
 
    printf("0x%x\n", f);
    printf("R0: %d %d\n", ARMPROC.R[0], res);
@@ -1598,6 +1655,8 @@ void test_jit_func(){
    
 }
 
+int thid_dynarec = -1;
+
 template<int PROCNUM> u32 arm_jit_compile()
 {
 	block_procnum = PROCNUM;
@@ -1608,12 +1667,14 @@ template<int PROCNUM> u32 arm_jit_compile()
    pc = base_adr; 
 
 
-   if (GetFreeSpace() < 16 * 1024){
+   if (GetFreeSpace() < 2 * 1024){
       //printf("Dynarec code reset\n");
       arm_jit_reset(true,true);
    }
 
    currentBlock.clearBlock(); 
+
+   //printf("JIT: Compiling block at 0x%08X, thumb: %d\n", base_adr, thumb);
 
    /*ArmOpCompiled f = op_decode[PROCNUM][thumb];
 		JIT_COMPILED_FUNC(base_adr, PROCNUM) = (uintptr_t)f;
@@ -1635,8 +1696,7 @@ template<int PROCNUM> u32 arm_jit_compile()
 		return f();
    }*/
 
-   generated_blocks[currentBlock.start_addr]++;
-
+  
    if (!thumb) {
       build_ArmBasicblock<PROCNUM>(); 
       currentBlock.optimize_basicblock();
@@ -1651,9 +1711,22 @@ template<int PROCNUM> u32 arm_jit_compile()
       build_ThumbBasicblock<PROCNUM>();
       currentBlock.optimize_basicblockThumb();
    }
-   
-   //printf("Compiling...\n");
-   return compile_basicblock<PROCNUM>();
+
+   /*
+   if (currentBlock.getNOpcodes() < 2)
+   {
+      //printf("Block too small\n");
+      //ArmOpCompiled f = op_decode[PROCNUM][thumb];
+		//JIT_COMPILED_FUNC(base_adr, PROCNUM) = (uintptr_t)f;
+      compile_basicblock<PROCNUM>();
+		return interpreted_cycles * 1.1;
+   }
+   */
+
+
+   // Return the number of cycles a bit higher than the interpreted cycles
+   compile_basicblock<PROCNUM>();
+   return interpreted_cycles * 1.1;
 }
 
 template u32 arm_jit_compile<0>();
@@ -1665,10 +1738,11 @@ void arm_jit_reset(bool enable, bool suppress_msg)
 	   printf("CPU mode: %s\n", enable?"JIT":"Interpreter");
 
    saveBlockSizeJIT = my_config.DynarecBlockSize; //CommonSettings.jit_max_block_size;
+   first_time = true;
 
    if (enable)
    {
-      //printf("JIT: max block size %d instruction(s)\n", CommonSettings.jit_max_block_size);
+      printf("JIT: max block size %d instruction(s)\n", CommonSettings.jit_max_block_size);
 
       #define JITFREE(x) memset(x,0,sizeof(x));
          JITFREE(JIT.MAIN_MEM);

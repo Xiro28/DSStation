@@ -33,6 +33,8 @@ void make_address_range_executable(u32 address_start, u32 address_end);
 void initCodeCache();
 void resetCodeCache();
 
+void  set_code_cache(u8* cache);
+
 void* emit_GetPtr();
 u32   emit_getPointAdr();
 u32   emit_getCurrAdr();

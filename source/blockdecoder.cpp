@@ -3,6 +3,7 @@
 #include "mips_code_emiter.h"
 #include "PSP/emit/psp_emit.h"
 #include "armcpu.h"
+#include "MMU.h"
 
 
 #include "Disassembler.h"
@@ -27,7 +28,6 @@ int intr_instr = 0;
 u32 start_block = 0;
 
 block currentBlock;  
-//reg_allocation reg_alloc; 
 register_manager regman;
 
 const char * compiled_functions_hash = 
@@ -51,8 +51,8 @@ inline int constexpr getTypeIdx(opType op) {
         case PRE_OP_ASR_REG: return 6;
         case PRE_OP_ROR_REG: return 7;
         default: 
-            //printf("Is this alright?\n");
-            return -1; // Default or error value
+            printf("Is this alright? Return 0 as value to not make the emulator crash\n");
+            return 0; // Default or error value
     }
 }
 
@@ -227,21 +227,22 @@ void CompleteCondition(u32 cond, u32 _addr, u32 label){
       emit_bnelC(psp_s4,psp_zero,label,_addr);
 }
 bool saved = false;
-void emit_prefetch(const u8 isize, bool saveR15, bool is_ITP){
+void emit_prefetch(const u8 isize, bool updateR15, bool store){
 
    static int skip = 1;
 
-   if (saveR15 || is_ITP){
+   if (updateR15 || store){
 
         emit_addiu(psp_fp, psp_fp, isize * skip);
 
-    if (is_ITP)
+    if (store)
         emit_sw(psp_fp, RCPU, _next_instr);
 
     saved = false;
 
     emit_addiu(psp_at, psp_fp, isize);
-    emit_sw(psp_at, RCPU, _R15);
+    if (store)
+        emit_sw(psp_at, RCPU, _R15);
 
     skip = 1;
    }else
@@ -370,6 +371,8 @@ void block::optimize_basicblock(){
         prev_op = &op;
     } 
 
+    prev_op = 0;
+
     return;
 }
 
@@ -482,13 +485,13 @@ void EmitReadFunction(u32 addr){
 	extern u8 *CodeCache;
 
 	//Execute the patch at the end (overwrite ra addr inside the sp)
-	asm volatile("addiu $2, $31, -8"); 
+	asm volatile("addiu $2, $31, -16"); 
 	asm volatile("sw $2, 0x14($29)");
 
 	//Get the current ra 
 	asm volatile("sw $31, %0":"=m"(o_ra));
 
-	u32 _ptr = emit_Set((o_ra - 8) - 0x8400000);
+	u32 _ptr = emit_Set((o_ra - 16) - 0x8400000);
 
     printf("EmitReadFunction: 0x%x 0x%x\n", o_ra, 0x8400000); 
 
@@ -507,7 +510,7 @@ void EmitReadFunction(u32 addr){
 	emit_Set(_ptr);
 
 	//make_address_range_executable(o_ra - 8, o_ra - 4);
-	u32 addr_start = o_ra - 8;
+	u32 addr_start = o_ra - 16;
 	__builtin_allegrex_cache(0x1a, addr_start);
 	__builtin_allegrex_cache(0x08, addr_start);
 }
@@ -533,20 +536,21 @@ void store_flags(){
         flag_loaded = false;
     }
 }
- 
+
+
+#define NDS_ReschedulePtr (*(bool*)(0x0010080))
 template <bool execute>
-u32 jump_to_linked(u32 addr, u32 _r15){
+u32 jump_to_linked_bc(u32 off){
     // check if the addr is already compiled
-    ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(addr, ARM9);
+    u32 addr = NDS_ARM9.R[15] + off;
+    
+    NDS_ARM9.R[15] += off;
+	NDS_ARM9.R[15] &= (0xFFFFFFFC|(NDS_ARM9.CPSR.bits.T<<1));
+	NDS_ARM9.next_instruction = NDS_ARM9.R[15];
 
-    NDS_ARM9.CPSR.bits.T = BIT0(addr);
-    NDS_ARM9.R[15] = addr & (0xFFFFFFFC|(NDS_ARM9.CPSR.bits.T<<1));
-    NDS_ARM9.next_instruction = NDS_ARM9.R[15];
-   
-    if (flag_dirty) store_flags();
-    flag_dirty = false;
+    ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(NDS_ARM9.next_instruction, ARM9);
 
-    if (code_block){
+    if (code_block && NDS_ReschedulePtr == 0){
         //printf("Fast jump\n");
         const u32 cycles = code_block();
         return cycles;
@@ -558,6 +562,89 @@ u32 jump_to_linked(u32 addr, u32 _r15){
 	return 3;
 }
 
+template <bool execute>
+u32 jump_to_linked_blc(u32 off){
+    // check if the addr is already compiled
+    u32 addr = NDS_ARM9.R[15] + off;
+
+    NDS_ARM9.R[14] = NDS_ARM9.next_instruction;
+	NDS_ARM9.R[15] += off;
+	NDS_ARM9.R[15] &= (0xFFFFFFFC|(NDS_ARM9.CPSR.bits.T<<1));
+	NDS_ARM9.next_instruction = NDS_ARM9.R[15];
+
+    ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(NDS_ARM9.next_instruction, ARM9);
+
+    if (code_block && NDS_ReschedulePtr == 0){
+        //printf("Fast jump\n");
+        const u32 cycles = code_block();
+        return cycles;
+    }
+
+    // compile the block
+    //printf("Compile block\n");
+    //const u32 cycles = arm_jit_compile<ARM9>();
+	return 3;
+}
+ 
+template <bool execute>
+u32 jump_to_linked(u32 addr){
+    // check if the addr is already compiled
+    
+    NDS_ARM9.CPSR.bits.T = BIT0(addr);
+    NDS_ARM9.R[15] = addr & (0xFFFFFFFC|(NDS_ARM9.CPSR.bits.T<<1));
+    NDS_ARM9.next_instruction = NDS_ARM9.R[15];
+
+    ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(NDS_ARM9.next_instruction, ARM9);
+
+    if (NDS_ARM9.CPSR.bits.T == BIT0(addr) && code_block && NDS_ReschedulePtr == 0){
+        //printf("Fast jump\n");
+        const u32 cycles = code_block();
+        return cycles;
+    }
+
+    // compile the block
+    //printf("Compile block\n");
+    //const u32 cycles = arm_jit_compile<ARM9>();
+	return 3;
+}
+
+template <bool execute>
+u32 jump_to_linked_br(u32 addr){
+    // check if the addr is already compiled
+    ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(addr, ARM9);
+
+    /*if (NDS_ARM9.CPSR.bits.T == BIT0(addr) && code_block){
+        //printf("Fast jump\n");
+        const u32 cycles = code_block();
+        return cycles;
+    }*/
+
+    printf("Jump to linked branch: 0x%x\n", addr);
+
+	
+	NDS_ARM9.R[14] =  NDS_ARM9.next_instruction;
+	NDS_ARM9.CPSR.bits.T = BIT0(addr);
+	NDS_ARM9.R[15] = addr & (0xFFFFFFFC|(NDS_ARM9.CPSR.bits.T<<1));
+	NDS_ARM9.next_instruction =  NDS_ARM9.R[15];
+    return 3;
+}
+
+u32 jump_to_linked_uncod_thumb(u32 addr){
+    // check if the addr is already compiled
+    
+    NDS_ARM9.R[15] += addr;
+    NDS_ARM9.next_instruction = NDS_ARM9.R[15];
+    
+    ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(NDS_ARM9.next_instruction, ARM9);
+
+    if (code_block && NDS_ReschedulePtr == 0){
+        //printf("Fast jump thumb\n");
+        const u32 cycles = code_block();
+        return cycles;
+    }
+	return 1;
+}
+
 
 u32 _read32(u32 addr, u32 addr_mem)
 {
@@ -567,8 +654,86 @@ u32 _read32(u32 addr, u32 addr_mem)
 	return *(u32*)(MMU.MAIN_MEM + addr_mem);
 }
 
+void _write16(u32 addr, u16 val)
+{
+    if((addr&(~0x3FFF)) == MMU.DTCMRegion){
+        T1WriteWord(MMU.ARM9_DTCM, addr & 0x3FFE, ((u16)val));
+    }
+    else{
+        JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK16, 0) = 0;
+        T1WriteWord(MMU.MAIN_MEM, addr & _MMU_MAIN_MEM_MASK16, val);
+    }
+}
+
+void _write32(u32 addr, u32 val)
+{
+    if((addr&(~0x3FFF)) == MMU.DTCMRegion){
+        *(u32*)(MMU.ARM9_DTCM + (addr & 0x3FFC)) = val;
+    }
+    else{
+        JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK32, 0) = 0;
+        JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK32, 1) = 0;
+        T1WriteLong( MMU.MAIN_MEM, addr & _MMU_MAIN_MEM_MASK32, val);
+    }
+}
+
+#include "FIFO.h"
+#include "NDSSystem.h"
+
+void write_3D_cmd(u32 addr, u32 data)
+{
+    extern void gfx3d_sendCommand(u32 cmd, u32 param);
+
+    /*case 0x400044:
+    case 0x400045:
+    case 0x400046:
+    case 0x400047:
+    case 0x400048:
+    case 0x400049:
+    case 0x40004A:
+    case 0x40004B:
+    case 0x40004C:
+    case 0x40004D:
+    case 0x40004E:
+    case 0x40004F:
+    case 0x400050:
+    case 0x400051:
+    case 0x400052:
+    case 0x400053:
+    case 0x400054:
+    case 0x400055:
+    case 0x400056:
+    case 0x400057:
+    case 0x400058:
+    case 0x400059:
+    case 0x40005A:
+    case 0x40005B:
+    case 0x40005C:		// Individual Commands*/
+    if (gxFIFO.size > 254)
+        nds.freezeBus |= 1;
+
+    ((u32 *)(MMU.MMU_MEM[ARMCPU_ARM9][0x40]))[(addr & 0xFFF) >> 2] = data;
+    gfx3d_sendCommand(addr, data);
+}
+
+void write_3D_fifo(u32 addr, u32 data)
+{
+    extern void gfx3d_sendCommandToFIFO(u32 val);
+    ((u32 *)(MMU.MMU_MEM[ARMCPU_ARM9][0x40]))[addr] = data;
+	gfx3d_sendCommandToFIFO(data);
+}
+
+template<uint32_t size>
+void write_dma(u32 val, u32 i, s32 shift_op, u32 type){
+
+    extern u32 get_addr(u32 addr, s32 shift_op, u32 type, u32 i);
+
+    u32 adr = get_addr(_ARMPROC.R[REG_POS(i,16)], shift_op, type, i);
+    MMU_new.write_dma<size>(static_cast<DmaRegister>(adr), val);
+}
+
 template<int PROCNUM>
-void emitARMOP(opcode& op, uint32_t reg_usage_end[17]){  
+void emitARMOP(opcode& op, const bool last_op){  
 
     const bool rd_allocated = regman.is_mapped(op.rd);
 
@@ -576,24 +741,79 @@ void emitARMOP(opcode& op, uint32_t reg_usage_end[17]){
     
  
     switch(op._op){
+
+        case OP_3D_CMD:
+        { 
+            int32_t regs[1] = { op.rs1 };
+
+            
+            conditional(
+
+                regman.get(1, regs);
+
+                emit_li(psp_a0, op.imm);
+                emit_jal(write_3D_cmd);
+                emit_move(psp_a1, regs[0]);
+            );
+            break;
+        }
+
+        case OP_3D_FIFO:{
+            int32_t regs[1] = { op.rs1 };
+
+            
+            conditional(
+
+                regman.get(1, regs);
+
+                emit_movi(psp_a0, ((op.imm & 0xFFF) >> 2));
+                emit_jal(write_3D_fifo);
+                emit_move(psp_a1, regs[0]);
+            );
+            break;
+        }
+
+        case OP_DMA:{
+
+            int32_t regs[] = { op.rs1 };
+
+            printf("DMA: %d\n", op.imm);
+            
+            conditional(
+
+                regman.get(1, regs);
+
+                emit_li(psp_a1, op.op_pc);
+                emit_li(psp_a2, op.imm);
+                emit_li(psp_a3, op.preOpType);
+
+                {
+                    emit_jal((write_dma<32>));
+                }
+
+                emit_move(psp_a0, regs[0]);
+            );
+
+            break;
+        }
   
         case OP_ITP:
         {
+            fallback:
+                conditional(
+                    if (flag_dirty) store_flags();
 
-            conditional(
-                if (flag_dirty) store_flags();
+                    flag_dirty = false;
+                    
+                    emit_li(psp_a0, op.rs1); 
 
-                flag_dirty = false;
-                
-                emit_li(psp_a0, op.rs1); 
+                    uint32_t optmizeDelaySlot = emit_SlideDelay();
 
-                uint32_t optmizeDelaySlot = emit_SlideDelay();
+                    emit_jal(arm_instructions_set[INSTRUCTION_INDEX(op.rs1)]); 
+                    emit_Write32(optmizeDelaySlot);
 
-                emit_jal(arm_instructions_set[INSTRUCTION_INDEX(op.rs1)]); 
-                emit_Write32(optmizeDelaySlot);
-
-                load_flags();
-            )
+                    if (!last_op) load_flags();
+                )
 
             intr_instr++;
         }
@@ -821,14 +1041,67 @@ void emitARMOP(opcode& op, uint32_t reg_usage_end[17]){
             break;
         }
 
+        case OP_BXRC:
+        {
+            regman.flush_all(false);
+            regman.reset();
+            
+            if (flag_dirty) store_flags();
+            flag_dirty = false;
+
+            emit_movi(psp_v0, 1);
+            conditional(
+                emit_jal(jump_to_linked_br<true>); 
+                loadReg(psp_a0, op.rs1);
+            )
+            break;
+        }
+
+        case OP_BC:
+        {
+            regman.flush_all(false);
+            regman.reset();
+            
+            if (flag_dirty) store_flags();
+            flag_dirty = false;
+
+            emit_movi(psp_v0, 1);
+            conditional(         
+                emit_li(psp_a0, op.imm);
+                u32 op = emit_SlideDelay();
+                emit_jal(jump_to_linked_bc<true>); 
+                emit_Write32(op);
+            )
+        }break;
+
+        case OP_BLC:
+        {
+            regman.flush_all(false);
+            regman.reset();
+            
+            if (flag_dirty) store_flags();
+            flag_dirty = false;
+
+            emit_movi(psp_v0, 1);
+            conditional(
+                emit_li(psp_a0, op.imm);
+                u32 op = emit_SlideDelay();
+                emit_jal(jump_to_linked_blc<true>); 
+                emit_Write32(op);
+            )
+        }break;
+
         case OP_BXC:
         {
             regman.flush_all(false);
             regman.reset();
             
+            if (flag_dirty) store_flags();
+            flag_dirty = false;
+
             //printf("0x%x, %d\n", (u32)emit_getCurrAdr(), op.rs1);
 
-            emit_movi(psp_v0, 3);
+            emit_movi(psp_v0, 1);
             conditional(
                 emit_jal(jump_to_linked<true>); 
                 loadReg(psp_a0, op.rs1);
@@ -933,16 +1206,27 @@ void emitARMOP(opcode& op, uint32_t reg_usage_end[17]){
                         }
                     }
                 } 
-
                 
                 emit_move(psp_a1, regs[1]);
                 
                 if (OP_STRH == op._op) {
-                    emit_jal(_MMU_write16<PROCNUM>); 
-                    emit_ins(psp_a0, psp_zero, 0, 0);
+                    /*if (op.extra_flags & EXTFL_DIRECTMEMACCESS){
+                        u32 op = emit_SlideDelay();
+                        emit_jal(_write16); 
+                        emit_Write32(op);
+                    }else*/{
+                        emit_jal(_MMU_write16<PROCNUM>); 
+                        emit_ins(psp_a0, psp_zero, 0, 0);
+                    }
                 } else { 
-                    emit_jal(_MMU_write32<PROCNUM>);
-                    emit_ins(psp_a0, psp_zero, 1, 0);
+                   /* if (op.extra_flags & EXTFL_DIRECTMEMACCESS){
+                        u32 op = emit_SlideDelay();
+                        emit_jal(_write32); 
+                        emit_Write32(op);
+                    }else*/{
+                        emit_jal(_MMU_write32<PROCNUM>);
+                        emit_ins(psp_a0, psp_zero, 1, 0);
+                    }
                 }
 
                 regman.reset(); 
@@ -1128,7 +1412,6 @@ void emitARMOP(opcode& op, uint32_t reg_usage_end[17]){
         case OP_CMP:
         case OP_STMIA:
         case OP_NOP:
-        case OP_FAST_MUL:
         case OP_LSR_0:        
         case OP_TST:
         case OP_AND_S:
@@ -1170,6 +1453,16 @@ bool block::emitThumbBlock(){
 
         const u8 isize = 2;
 
+        int32_t regs[] {op.rs1, op.rs2, op.rd};
+        
+        if ((op._op == OP_ITP || op._op == OP_SWI)) 
+        {
+            regman.flush_all();  
+            regman.reset();  
+        }
+        /*else
+        regman.push_sp_reg(3, regs);*/
+
         //reg_alloc.alloc_regs(op); 
 
         if (last_op.op_pc != op.op_pc)
@@ -1186,6 +1479,8 @@ bool block::emitThumbBlock(){
   
     regman.flush_all();
     regman.reset();
+
+    //regman.pull_sp_regs();
 
     //possible idle loop, do more checks here
     return idleLoop;
@@ -1207,13 +1502,13 @@ bool block::emitArmBlock(){
 
     use_flags = uses_flags;
 
-    //char * found = strstr(compiled_functions_hash, block_hash);
+    /*char * found = strstr(compiled_functions_hash, block_hash);
 
-    /*if (found != NULL) {
+    if (found != NULL) {
         return arm_compiledOP[(found - compiled_functions_hash) / 51](PROCNUM);
     }*/
 
-   //StartCodeDump();
+   StartCodeDump();
 
     start_block = emit_getCurrAdr();
     emit_li(psp_fp, opcodes.front().op_pc);
@@ -1224,19 +1519,11 @@ bool block::emitArmBlock(){
 
     const u8 isize =  4;
     for(opcode op : opcodes){ 
-
         if ((op._op == OP_ITP || op._op == OP_SWI)) 
         {
             regman.flush_all();  
             regman.reset();  
         }
-
-        if (op.condition != -1) {
-            // not sure if this is the only one to flush... might be that rs1 and rs2 are also needed to be flushed
-            // TODO: check if rs1 and rs2 are needed to be flushed
-            //regman.flush_nds(op.rd);  
-        }
-
 
         if (last_op.op_pc != op.op_pc)
             emit_prefetch(isize, op.rs1 == 15 || op.rs2 == 15, op._op == OP_ITP);
@@ -1245,31 +1532,30 @@ bool block::emitArmBlock(){
             emit_prefetch(isize, true, true);
         }
 
-        emitARMOP<PROCNUM>(op, this->reg_usage_end);         
+        emitARMOP<PROCNUM>(op, last_op.op_pc == op.op_pc);         
     } 
 
     regman.flush_all();
     regman.reset();
+
     if (flag_dirty) store_flags();
     flag_dirty = false;
 
-    /*if (!JumpOP){
-        ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(last_op.op_pc, ARM9);
+    if (!JumpOP){
+        ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(last_op.op_pc + 4, ARM9);
+
         if (code_block){
-            //printf("fast path\n");
-            const u32 op = emit_SlideDelay();
-            emit_jal(code_block); 
-            emit_Write32(op);
-
-            JumpOP = true;
+            //printf("Fast jump\n");
+            //code_block();
+            //JumpOP = true;
         }
-    }*/
+    }
 
+    //regman.pull_sp_regs();
 
-
-   /* if (opcodes.size() > 30)
-        CodeDump("30_ops.bin");*/
-   
+    /*if (opcodes.size() > 30)
+        CodeDump("30_ops.bin");
+   */
  
     //possible idle loop, do more checks here
     return idleLoop;

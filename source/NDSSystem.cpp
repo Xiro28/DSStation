@@ -30,6 +30,7 @@
 #include "utils/decrypt/decrypt.h"
 #include "utils/decrypt/crc.h"
 #include "utils/advanscene.h"
+#include "mips_code_emiter.h"
 //#include "utils/task.h"
 
 #include "common.h"
@@ -87,6 +88,9 @@ using std::max;
 
 TSCalInfo TSCal;
 
+unsigned int cache_hit = 0;
+unsigned int cache_miss = 0;
+
 namespace DLDI
 {
 	bool tryPatch(void* data, size_t size, unsigned int device);
@@ -97,6 +101,7 @@ namespace Sound_Nitro{
     extern void OnIPCRequest(u32 data);
     extern void Reset();
     extern void Process(u32 param);
+	extern void OnAlarm(u32 num);
 }
 
 class FrameSkipper
@@ -432,8 +437,136 @@ private:
     }
 };
 
-LRUCache<1024 * 64> cached_rom;
+#include "ctrlssdl.h"
+
+int times = 0;
+int FPS_Counter = 0;
+u32 last_fps_timing = 0;
+u32 fps_base_tick = 0;
+u32 fps_frame_counter = 0;
+
+int skips = 0;
+
 bool drawn = true;
+bool drawingInterruptPending = false;
+
+constexpr int max_framerate[]{1000000 / 1000, 1000000 / 60, 1000000 / 50, 1000000 / 40, 1000000 / 30, 1000000 / 25};
+
+
+void ShowFPS(int x, int y)
+{
+	pspDebugScreenSetXY(x, y);
+	pspDebugScreenPrintf("FPS: %d   cache_hit: %ld  cache_miss: %ld            ", FPS_Counter, cache_hit, cache_miss);
+}
+
+extern void cpuSendInterrupt();
+static void desmume_cycle()
+{
+	u16 pad = 0;
+
+	const int FRAME_TIME_MICROSEC = max_framerate[my_config.fps_cap_num];
+	static u32 last_frame_time = 0;
+
+	process_ctrls_event(pad);
+
+	if (!mouse.click)
+	{
+		void NDS_releaseTouchDirect();
+		NDS_releaseTouchDirect();
+	}
+	else
+	{
+		void NDS_setTouchPosDirect(u16 x, u16 y);
+		NDS_setTouchPosDirect(mouse.x, mouse.y);
+	}
+
+
+	u32 curr_timing = sceKernelGetSystemTimeLow();
+	u32 elapsed = curr_timing - last_frame_time;
+
+	fps_frame_counter++;
+
+	if (curr_timing - last_fps_timing >= 1000000)
+	{
+		FPS_Counter = fps_frame_counter;
+		fps_frame_counter = 0;
+
+		last_fps_timing += 1000000;
+	}
+
+	// Frame rate limiting
+	if (my_config.fps_cap_num > 0 && elapsed < FRAME_TIME_MICROSEC)
+	{
+		// frameskip only if the desidered framerate is not reached 
+		if (skips-- > 0)
+			NDS_SkipNextFrame();
+		else
+		{
+			skips = my_config.frameskip;
+		}
+
+		sceKernelDelayThread(FRAME_TIME_MICROSEC - elapsed);
+		last_frame_time += FRAME_TIME_MICROSEC;
+	}
+	else
+	{
+		last_frame_time = curr_timing;
+	}
+
+	// Or frameskip if the framerate is not capped.
+	if (my_config.fps_cap_num == 0) {
+		if (skips-- > 0)
+			NDS_SkipNextFrame();
+		else
+		{
+			skips = my_config.frameskip;
+		}
+	}
+
+	// Process non-emulation (hardware) rendering and interrupts.
+	if (likely(!IsEmu())) {
+		if (drawn || drawingInterruptPending) {
+			// If a new frame was drawn, decide whether to send an interrupt now
+			// or mark one as pending based on whether the 2D frame should be skipped.
+			/*if (!ShouldSkip2dFrame()) {*/
+
+			/*} else {
+				drawingInterruptPending = true;
+			}*/
+
+			// Since the ME runs slower than the CPU, we need to draw the screen even if the frameskip is enabled.
+			// This is because the ME could wait up to 10 frames before drawing the screen again. So better to set it pending.
+			// And if not triggered by the ME on the next frame, then we can draw the screen.
+			if (ShouldSkip2dFrame()) {
+				drawingInterruptPending = true;
+			} else {
+				cpuSendInterrupt();
+				drawn = false;
+				drawingInterruptPending = false;
+			}
+
+			// Render the screen (using 3D frame-skipping state)
+			EMU_SCREEN(ShouldSkip2dFrame(), ShouldSkip3dFrame());
+		}
+	}else {
+		//SPU_Emulate_core();
+		//SPU_Emulate_user();
+		const int sz_SCR = 256 * 192 * 4;
+		sceDmacMemcpy(&((u8*)(0x04100000))[0], (u8*)&GPU_Screen[0], sz_SCR);
+		renderScreenFull();
+		EMU_SCREEN(frameSkipper.ShouldSkip2D(), frameSkipper.ShouldSkip3D());
+	}
+
+	if (my_config.showfps)
+		ShowFPS(0, 3);
+
+	/*if (my_config.enable_sound)
+		SPU_Emulate_user();*/
+}
+
+
+LRUCache<1024 * 256> cached_rom;
+
 int NDS_Init()
 {
 	nds.idleFrameCounter = 0;
@@ -760,7 +893,7 @@ void GameInfo::closeROM()
 	lastReadPos = 0xFFFFFFFF;
 }
 
-
+#define PROFILE
 
 u32 GameInfo::readROM(u32 pos)
 {
@@ -810,10 +943,10 @@ u32 GameInfo::readROM(u32 pos)
 			data = LE_TO_LOCAL_32(data) & ~pad | pad;
 
 			cached_rom[pos] = data;
-
-			return data;
-		}else
-			return data;
+			cache_miss++;
+		}else 
+			cache_hit++;
+		return data;
 	#endif
 }
 
@@ -1004,6 +1137,61 @@ struct TSequenceItem
 	FORCEINLINE u64 next()
 	{
 		return timestamp;
+	}
+};
+
+struct TSequenceItem_AlarmHLE : public TSequenceItem
+{
+	FORCEINLINE bool isTriggered()
+	{
+		extern u64 alarm_scheduled[8];
+
+		return false;
+
+		// TODO: Implement this properly
+		/*return (nds_timer >= alarm_scheduled[0] && alarm_scheduled[0] != 0) ||
+			(alarm_scheduled[1] != 0 && nds_timer >= alarm_scheduled[1]) ||
+			(alarm_scheduled[2] != 0 && nds_timer >= alarm_scheduled[2]) ||
+			(alarm_scheduled[3] != 0 && nds_timer >= alarm_scheduled[3]) ||
+			(alarm_scheduled[4] != 0 && nds_timer >= alarm_scheduled[4]) ||
+			(alarm_scheduled[5] != 0 && nds_timer >= alarm_scheduled[5]) ||
+			(alarm_scheduled[6] != 0 && nds_timer >= alarm_scheduled[6]) ||
+			(alarm_scheduled[7] != 0 && nds_timer >= alarm_scheduled[7]);*/
+	}
+
+	FORCEINLINE void exec()
+	{
+//		IF_DEVELOPER(DEBUG_statistics.sequencerExecutionCounters[4]++);
+		extern void OnAlarm(u32);
+		extern u64 alarm_scheduled[8];
+
+		u32 alarm_triggered = -1;
+		for(int i=0;i<8;i++)
+		{
+			if(alarm_scheduled[i] == 0) continue;
+
+			if(alarm_scheduled[i] <= nds_timer)
+			{
+				alarm_scheduled[alarm_triggered] = 0;
+				Sound_Nitro::OnAlarm(alarm_triggered);
+			}
+		}
+	}
+
+	FORCEINLINE u64 next()
+	{
+		extern u64 alarm_scheduled[8];
+
+		u64 min_cycles = kNever;
+		
+		for(int i=0;i<8;i++)
+		{
+			if(alarm_scheduled[i] == 0) continue;
+
+			min_cycles = std::min<u64>(min_cycles, alarm_scheduled[i]);
+		}
+
+		return min_cycles;
 	}
 };
 
@@ -1214,6 +1402,29 @@ struct TSequenceItem_sqrtunit : public TSequenceItem
 
 };
 
+struct TSequenceItem_WiFi : public TSequenceItem
+{
+	FORCEINLINE bool isTriggered()
+	{
+		return enabled && nds_timer >= timestamp;
+	}
+
+	bool isEnabled() { return this->enabled; }
+
+	FORCEINLINE u64 next()
+	{
+		return timestamp;
+	}
+
+	void exec()
+	{
+		extern void wifi_scan_callback();
+		enabled = false;
+		wifi_scan_callback();
+	}
+
+};
+
 struct TSequenceItem_ReadSlot1 : public TSequenceItem
 {
 	FORCEINLINE bool isTriggered()
@@ -1235,9 +1446,30 @@ struct TSequenceItem_ReadSlot1 : public TSequenceItem
 		u32 val = T1ReadLong(MMU.MMU_MEM[procnum][0x40], 0x1A4);
 		val |= 0x00800000;
 		T1WriteLong(MMU.MMU_MEM[procnum][0x40], 0x1A4, val);
-		triggerDma(EDMAMode_Card);
+		triggerDma<EDMAMode_Card>();
 	}
 
+};
+
+enum EventID {
+    DISP_CNT,
+    DIVIDER,
+    SQRT_UNIT,
+    GX_FIFO,
+    WIFI_HLE,
+    WIFI_EXP,           // EXPERIMENTAL_WIFI_COMM
+    HLE_AUDIO,
+    // DMA channels
+    DMA_00, DMA_01, DMA_02, DMA_03,
+    DMA_10, DMA_11, DMA_12, DMA_13,
+    DMA_20, DMA_21, DMA_22, DMA_23,
+    DMA_30, DMA_31, DMA_32, DMA_33,
+    // Timer channels
+    TIMER_00, TIMER_01, TIMER_02, TIMER_03,
+    TIMER_10, TIMER_11, TIMER_12, TIMER_13,
+    TIMER_20, TIMER_21, TIMER_22, TIMER_23,
+    TIMER_30, TIMER_31, TIMER_32, TIMER_33,
+    EVENT_COUNT
 };
 
 struct Sequencer
@@ -1247,6 +1479,8 @@ struct Sequencer
 	TSequenceItem dispcnt;
 	TSequenceItem wifi;
 	TSequenceItem hle_audio;
+	TSequenceItem_WiFi wifi_hle;
+	TSequenceItem_AlarmHLE alarmHLE;
 	TSequenceItem_divider divider;
 	TSequenceItem_sqrtunit sqrtunit;
 	TSequenceItem_GXFIFO gxfifo;
@@ -1259,6 +1493,7 @@ struct Sequencer
 	TSequenceItem_Timer<0,2> timer_0_2; TSequenceItem_Timer<0,3> timer_0_3;
 	TSequenceItem_Timer<1,0> timer_1_0; TSequenceItem_Timer<1,1> timer_1_1;
 	TSequenceItem_Timer<1,2> timer_1_2; TSequenceItem_Timer<1,3> timer_1_3;
+
 
 	void init();
 
@@ -1328,6 +1563,13 @@ void NDS_RescheduleReadSlot1(int procnum, int size)
 	NDS_Reschedule();
 }
 
+void NDS_RescheduleWiFi(u64 cycles)
+{
+	sequencer.wifi_hle.timestamp = nds_timer + cycles;
+	sequencer.wifi_hle.enabled = true;
+	NDS_ReschedulePtr = 1;
+}
+
 
 void NDS_RescheduleGXFIFO(u32 cost)
 {
@@ -1375,11 +1617,13 @@ static void initSchedule()
 //				= 33513982 cycles per second
 // 				= 33.513982 cycles per microsecond
 const u64 kWifiCycles = 67;//34*2;
-const u64 kAudioCycles = (u64)(174592.0f * 2.9f);
+const u64 kAudioCycles = 174592;
 //(this isn't very precise. I don't think it needs to be)
 
 void Sequencer::init()
 {
+	NDS_ReschedulePtr = 0;
+
 	NDS_RescheduleTimers();
 	NDS_RescheduleDMA();
 
@@ -1404,14 +1648,19 @@ void Sequencer::init()
 	dma_1_3.controller = &MMU_new.dma[1][3];
 
 	hle_audio.enabled = true;
-	hle_audio.timestamp = 0;	
+	hle_audio.timestamp = kAudioCycles;	
+
+	wifi_hle.enabled = false;
+	wifi_hle.timestamp = 0;
+
+	alarmHLE.enabled = false;
+	alarmHLE.timestamp = 0;
 
 	// test ptr
 	/* *(volatile bool*)(0x00010000) = 0;
 	printf("*reschedulePtr: %d\n", *reschedulePtr);
 	*(volatile bool*)(0x00010000) = 1;
 	printf("*reschedulePtr: %d\n", *reschedulePtr);*/ 
-	NDS_ReschedulePtr = 0;
 
 
 	#ifdef EXPERIMENTAL_WIFI_COMM
@@ -1432,7 +1681,7 @@ static void execHardware_hblank()
 	//scroll regs for the next scanline
 
 	if (nds.hw_status.VCount<192) {
-		triggerDma(EDMAMode_HBlank);
+		triggerDma<EDMAMode_HBlank>();
 	}
 
 	//turn on hblank status bit
@@ -1471,7 +1720,7 @@ static void execHardware_hstart_vblankStart()
 		}
 
 	//trigger vblank dmas
-	triggerDma(EDMAMode_VBlank);
+	triggerDma<EDMAMode_VBlank>();
 
 
 	//tracking for arm9 load average
@@ -1485,7 +1734,7 @@ static void execHardware_hstart_vblankStart()
 
 static u16 execHardware_gen_vmatch_goal()
 {
-	u16 vmatch = T1ReadWord(PSP_UC(MMU.ARM9_REG), 4);
+	u16 vmatch = T1ReadWord(MMU.ARM9_REG, 4);
 	vmatch = ((vmatch>>8)|((vmatch<<1)&(1<<8)));
 	return vmatch;
 }
@@ -1568,8 +1817,7 @@ static void execHardware_hstart()
 	}
 	else if(nds.hw_status.VCount==262)
 	{
-		if (!frameSkipper.ShouldSkip3D() && my_config.Render3D)
-			gfx3d_VBlankEndSignal(frameSkipper.ShouldSkip3D());
+		gfx3d_VBlankEndSignal(frameSkipper.ShouldSkip3D());
 		
 		execHardware_hstart_vblankEnd();
 	}
@@ -1599,7 +1847,7 @@ static void execHardware_hstart()
 
 		gfx3d_VBlankSignal();
 		//this isnt important for any known game, but it would be nice to prove it. 
-		//NDS_RescheduleGXFIFO(392 * 2);
+		NDS_RescheduleGXFIFO(392 * 2);
 	}
 	
 	//write the new vcount
@@ -1617,7 +1865,7 @@ static void execHardware_hstart()
 	
 	//trigger hstart dmas
 	
-	triggerDma(EDMAMode_HStart);
+	triggerDma<EDMAMode_HStart>();
 
 	//used by the hle
 	StartScanline(nds.hw_status.VCount);
@@ -1629,7 +1877,7 @@ static void execHardware_hstart()
 		//it should be driven by a fifo (and generate just in time as the scanline is displayed)
 		//but that isnt even possible until we have some sort of sub-scanline timing.
 		//it may not be necessary.
-		triggerDma(EDMAMode_MemDisplay);
+		triggerDma<EDMAMode_MemDisplay>();
 	}
 }
 
@@ -1648,6 +1896,7 @@ FORCEINLINE u64 _fast_min(u64 a, u64 b)
 
 u64 Sequencer::findNext()
 {
+	
 	//this one is always enabled so dont bother to check it
 	u64 next = dispcnt.next();
 	
@@ -1656,6 +1905,11 @@ u64 Sequencer::findNext()
 
 	if(gxfifo.enabled) next = min(next,gxfifo.next());
 
+	if (wifi_hle.isEnabled()) {
+		//if the wifi is enabled, then we need to check the next wifi event
+		next = min(next,wifi_hle.next());
+	}
+
 	//if(readslot1.isEnabled()) next = _fast_min(next,readslot1.next());
 
 #ifdef EXPERIMENTAL_WIFI_COMM
@@ -1663,6 +1917,7 @@ u64 Sequencer::findNext()
 #endif
 
 	if (hle_audio.enabled) next = min(next, hle_audio.next());
+	//if (alarmHLE.enabled) next = min(next, alarmHLE.next());
 
 #define test(X,Y) if(dma_##X##_##Y .isEnabled()) next = min(next,dma_##X##_##Y .next());
 		test(0,0); test(0,1); test(0,2); test(0,3);
@@ -1723,30 +1978,37 @@ void Sequencer::execHardware()
 	if (sqrtunit.isTriggered()) sqrtunit.exec();
 	if (divider.isTriggered()) divider.exec();
 
+	if (alarmHLE.isTriggered())
+	{
+		alarmHLE.exec();
+	}
+
+	if (wifi_hle.isTriggered()) {
+		//if the wifi is enabled, then we need to check the next wifi event
+		wifi_hle.exec();
+	}
+
 
 	if (hle_audio.isTriggered())
 	{
 		Sound_Nitro::Process(1);
-		hle_audio.timestamp += kAudioCycles;
+		hle_audio.timestamp = nds_timer + kAudioCycles;
 	}
 		
 #define test(X,Y) if(dma_##X##_##Y .isTriggered()) dma_##X##_##Y .exec();
 		test(0,0); test(0,1); test(0,2); test(0,3);
 		//test(1,0); test(1,1); test(1,2); test(1,3);
 #undef test
-#define test(X,Y) if(timer_##X##_##Y .enabled) if(timer_##X##_##Y .isTriggered()) timer_##X##_##Y .exec();
+#define test(X,Y) if(timer_##X##_##Y .isTriggered()) timer_##X##_##Y .exec();
 		test(0,0); test(0,1); test(0,2); test(0,3);
 		//test(1,0); test(1,1); test(1,2); test(1,3);
 #undef test
-
 }
 
 void execHardware_interrupts();
 
 static void saveUserInput(EMUFILE* os);
 static bool loadUserInput(EMUFILE* is, int version);
-
-bool drawingInterruptPending = false;
 
 void nds_savestate(EMUFILE* os)
 {
@@ -1789,128 +2051,106 @@ bool nds_loadstate(EMUFILE* is, int size)
 const int kIrqWait = 4000;
 const int kMaxWork = 4000;
 
-int times = 0;
-
-template<bool FORCE>
-void NDS_exec(s32 nb)
+s32 arm9 = 0;
+s32 s32next = 0;
+u64 old_next = 0;
+void exec_cpu()
 {
-	sequencer.nds_vblankEnded = false;
-
-	if(nds.hw_status.sleeping)
-	{
-		//speculative code: if ANY irq happens, wake up the arm7.
-		//I think the arm7 program analyzes the system and may decide not to wake up
-		//if it is dissatisfied with the conditions
-		if((MMU.reg_IE[1] & MMU.gen_IF<1>()))
-		{
-			nds.hw_status.sleeping = FALSE;
-		}
-
-		return;
-	}
-
-	for(;;)
-	{
-
-		sequencer.execHardware();
-
-		//break out once per frame
-		if(unlikely(sequencer.nds_vblankEnded)) break;
-		//it should be benign to execute execHardware in the next frame,
-		//since there won't be anything for it to do (everything should be scheduled in the future)
-
-		execHardware_interrupts();
-
-		//find next work unit:
-		u64 next = sequencer.findNext();
+	NDS_ReschedulePtr = 0;
+	u64 next = old_next;
+	
+	if (next == 0) {
+		next = sequencer.findNext();
 		next = min(next,nds_timer+kMaxWork);
 
-		NDS_ReschedulePtr = 0;
+		old_next = next;
+	}
 
-		u64 nds_timer_base = nds_timer;
-		s32 s32next = (s32)(next-nds_timer);
-		s32 arm9 = (s32)(nds_arm9_timer-nds_timer);
-
-		NDS_ARM9.idle_loop = false;
-
-		while (arm9 < s32next && NDS_ReschedulePtr == 0) {
-			if (!(NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ) && !nds.freezeBus) {
-				
-				arm9 += armcpu_exec<ARMCPU_ARM9, true>();
+	u64 nds_timer_base = nds_timer;
+	s32next = (s32)(next-nds_timer);
+	arm9 = (s32)(nds_arm9_timer-nds_timer);
+	while (arm9 < s32next && NDS_ReschedulePtr == 0) {
+		if (!(NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ) && !nds.freezeBus) {
+			
+			arm9 += armcpu_exec<ARMCPU_ARM9, true>();
 
 
-				// Idle loop optimization:
-				// If the CPU is in an idle loop state, immediately set arm9 to s32next,
-				// effectively fast-forwarding the simulation.
-				if (NDS_ARM9.idle_loop && arm9 < s32next){
-					arm9 = s32next;
-					break;
-				}
-				
-				nds_timer = nds_timer_base + arm9;
-
-			} else {
-				s32 temp = arm9;
-				arm9 = std::min(s32next, arm9 + kIrqWait);
-				nds.idleCycles[0] += (arm9 - temp);
-
-				if (gxFIFO.size < 255)
-					nds.freezeBus &= ~1;
+			// Idle loop optimization:
+			// If the CPU is in an idle loop state, immediately set arm9 to s32next,
+			// effectively fast-forwarding the simulation.
+			if (NDS_ARM9.idle_loop && arm9 < s32next){
+				arm9 = s32next;
+				break;
 			}
-		}
+			
+			nds_timer = nds_timer_base + arm9;
 
-		nds_timer = nds_timer_base + arm9;
+		} else {
+			s32 temp = arm9;
+			arm9 = s32next; // Jump directly to the next event // std::min(s32next, arm9 + kIrqWait);
+			nds.idleCycles[0] += (arm9 - temp);
 
-		nds_arm9_timer = nds_timer_base + arm9;
-		nds_arm7_timer = nds_timer_base + (arm9 >> 1);
+			if (nds.freezeBus && gxFIFO.size < 255)
+				nds.freezeBus &= ~1;
 
-		//if we were waiting for an irq, don't wait too long:
-		//let's re-analyze it after this hardware event (this rolls back a big burst of irq waiting which may have been interrupted by a resynch)
-		if(NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ)
-		{
-			nds.idleCycles[0] -= (s32)(nds_arm9_timer-nds_timer);
-			nds_arm9_timer = nds_timer;
-		}
-
-		if (NDS_ARM7.freeze & CPU_FREEZE_WAIT_IRQ)
-		{
-			nds.idleCycles[1] -= (s32)nds_arm7_timer-nds_timer;
-			nds_arm7_timer = nds_timer;
-		}
-	}
-
-	extern void cpuSendInterrupt();
-
-	disp_fifo.head = disp_fifo.tail = 0;
-
-	// Process non-emulation (hardware) rendering and interrupts.
-	if (likely(!IsEmu())) {
-		if (drawn) {
-			// If a new frame was drawn, decide whether to send an interrupt now
-			// or mark one as pending based on whether the 2D frame should be skipped.
-			/*if (!ShouldSkip2dFrame()) {*/
-
-			/*} else {
-				drawingInterruptPending = true;
+			// If we are waiting for an IRQ, we need to reschedule the next check
+			/*if (NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ) {
+				nds_arm9_timer = nds_timer_base + arm9;
+				NDS_ReschedulePtr = 1;
 			}*/
-
-
-			// Render the screen (using 3D frame-skipping state)
-			EMU_SCREEN(false, ShouldSkip3dFrame());
-
-			cpuSendInterrupt();
-			drawn = false;
 		}
-	}else {
-		if (my_config.enable_sound)
-			SPU_Emulate_core();
-
-		const int sz_SCR = 256 * 192 * 4;
-		sceDmacMemcpy(&((u8*)(0x04100000))[0], (u8*)&GPU_Screen[0], sz_SCR);
-		renderScreenFull();
-		EMU_SCREEN(frameSkipper.ShouldSkip2D(), frameSkipper.ShouldSkip3D());
 	}
 
+	if (arm9 >= s32next) old_next = 0;
+
+	/*printf("Status: %s %d cycles, %d idle cycles. Bus %s\n",
+					NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ ? "waiting for IRQ" : "idle",
+					arm9, nds.idleCycles[0], nds.freezeBus ? "frozen" : "unfrozen");*/
+
+	nds_timer = nds_timer_base + arm9;
+
+	nds_arm9_timer = nds_timer_base + arm9;
+	nds_arm7_timer = nds_timer_base + (arm9 >> 1);
+}
+
+// This will be our instruction pointer for the NDS execution loop in asm in order to have a better instruction management.
+uint8_t* NDS_exec_code = ((uint8_t*)(SCRATCHPAD_ADDR + 0x1000));
+
+void exec_hw(){
+	//it should be begin to execute execHardware in the next frame,
+	//since there won't be anything for it to do (everything should be scheduled in the future)
+	sequencer.execHardware();
+}
+
+
+void NDS_setup()
+{
+	u32 last_addr = emit_Set(0);
+	set_code_cache(NDS_exec_code);
+	
+	void* loop_label = emit_GetPtr();
+
+	emit_jal((u32)exec_cpu);
+	emit_nop();//emit_sw(psp_zero, psp_t5, 80); // NDS_ReschedulePtr = 0;
+
+	emit_jal((u32)execHardware_interrupts);
+	emit_nop();//emit_lui(psp_t5, 0x1);
+
+	emit_jal((u32)exec_hw);
+	emit_nop();
+
+	
+	emit_j(loop_label); // jump to the loop label
+	emit_nop();
+
+	make_address_range_executable((u32)loop_label, (u32)emit_GetPtr());
+
+	emit_Set(last_addr);
+	set_code_cache(NULL);
+
+	printf("NDS execution code generated at %p.\n", loop_label);
+
+	((void(*)()) loop_label)();
 }
 
 template<int PROCNUM> static void execHardware_interrupts_core()
@@ -1930,8 +2170,42 @@ template<int PROCNUM> static void execHardware_interrupts_core()
 
 void execHardware_interrupts()
 {
+	if(sequencer.nds_vblankEnded) {
+		disp_fifo.head = disp_fifo.tail = 0;
+		
+		desmume_cycle();
+		
+		/*if(nds.hw_status.sleeping)
+		{
+			//speculative code: if ANY irq happens, wake up the arm7.
+			//I think the arm7 program analyzes the system and may decide not to wake up
+			//if it is dissatisfied with the conditions
+			if((MMU.reg_IE[1] & MMU.gen_IF<1>()))
+			{
+				nds.hw_status.sleeping = FALSE;
+			}
+		}*/
+		
+		sequencer.nds_vblankEnded = false;
+	}
+
+
 	execHardware_interrupts_core<ARMCPU_ARM9>();
-	execHardware_interrupts_core<ARMCPU_ARM7>();
+	//execHardware_interrupts_core<ARMCPU_ARM7>();
+
+	//if we were waiting for an irq, don't wait too long:
+	//let's re-analyze it after this hardware event (this rolls back a big burst of irq waiting which may have been interrupted by a resynch)
+	if(NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ)
+	{
+		nds.idleCycles[0] -= (s32)(nds_arm9_timer-nds_timer);
+		nds_arm9_timer = nds_timer;
+	}
+
+	if (NDS_ARM7.freeze & CPU_FREEZE_WAIT_IRQ)
+	{
+		nds.idleCycles[1] -= (s32)nds_arm7_timer-nds_timer;
+		nds_arm7_timer = nds_timer;
+	}
 }
 
 static void resetUserInput();
@@ -2322,13 +2596,12 @@ void NDS_Reset()
 	LidClosed = FALSE;
 	countLid = 0;
 
+	
 	MMU_Reset();
-
+	
 	SetupMMU(false,false);
-
+	
 	JumbleMemory();
-
-	arm_jit_reset(true);
 
 	//initialize CP15 specially for this platform
 	//TODO - how much of this is necessary for firmware boot?
@@ -2489,11 +2762,8 @@ static void resetUserInput()
 	resetUserInput(intermediateUserInput);
 }
 
-static inline void gotInputRequest(){}
-
 void NDS_setPad(bool R,bool L,bool D,bool U,bool T,bool S,bool B,bool A,bool Y,bool X,bool W,bool E,bool G, bool F)
 {
-	gotInputRequest();
 	UserButtons& rawButtons = rawUserInput.buttons;
 	rawButtons.R = R;
 	rawButtons.L = L;
@@ -2510,35 +2780,48 @@ void NDS_setPad(bool R,bool L,bool D,bool U,bool T,bool S,bool B,bool A,bool Y,b
 	rawButtons.G = G;
 	rawButtons.F = F;
 }
+
+void NDS_setTouchPosDirect(u16 x, u16 y)
+{
+	u16 adc_x = NDS_getADCTouchPosX(x);
+	u16 adc_y = NDS_getADCTouchPosY(y);
+	nds.adc_touchX = adc_x;
+	nds.adc_touchY = adc_y;
+
+	nds.scr_touchX = x;
+	nds.scr_touchY = y;
+	nds.hw_status.Touching  = 1;
+}
+
+void NDS_releaseTouchDirect(void)
+{ 
+	nds.adc_touchX = 0;
+	nds.adc_touchY = 0;
+	nds.scr_touchX = 0;
+	nds.scr_touchY = 0;
+	nds.hw_status.Touching = 0;
+}
+
 void NDS_setTouchPos(u16 x, u16 y)
 {
-	gotInputRequest();
 	rawUserInput.touch.touchX = x<<4;
 	rawUserInput.touch.touchY = y<<4;
 	rawUserInput.touch.isTouch = true;
 }
 void NDS_releaseTouch(void)
 { 
-	gotInputRequest();
 	rawUserInput.touch.touchX = 0;
 	rawUserInput.touch.touchY = 0;
 	rawUserInput.touch.isTouch = false;
 }
 void NDS_setMic(bool pressed)
 {
-	gotInputRequest();
 	rawUserInput.mic.micButtonPressed = (pressed ? TRUE : FALSE);
 }
 
 
-static void NDS_applyFinalInput();
-
-
 void NDS_beginProcessingInput()
 {
-	// start off from the raw input
-	intermediateUserInput = rawUserInput;
-
 	// processing is valid now
 	validToProcessInput = true;
 }
@@ -2546,25 +2829,65 @@ void NDS_beginProcessingInput()
 void NDS_endProcessingInput()
 {
 	// transfer the processed input
-	finalUserInput = intermediateUserInput;
+	finalUserInput = rawUserInput;
 
 	// processing is invalid now
 	validToProcessInput = false;
 
 	// use the final input for a few things right away
-	NDS_applyFinalInput();
+	//NDS_applyFinalInput();
+}
+
+
+
+void NDS_applyFinalInputDirect(u16 pad, u16 padExt)
+{
+
+	((u16 *)MMU.ARM9_REG)[0x130>>1] = (u16)pad;
+	((u16 *)MMU.ARM7_REG)[0x130>>1] = (u16)pad;
+
+
+	u16 k_cnt = ((u16 *)MMU.ARM9_REG)[0x132>>1];
+	if ( k_cnt & (1<<14))
+	{
+		//INFO("ARM9: KeyPad IRQ (pad 0x%04X, cnt 0x%04X (condition %s))\n", pad, k_cnt, k_cnt&(1<<15)?"AND":"OR");
+		u16 k_cnt_selected = (k_cnt & 0x3F);
+		if (k_cnt&(1<<15))	// AND
+		{
+			if ((~pad & k_cnt_selected) == k_cnt_selected) NDS_makeIrq(ARMCPU_ARM9,IRQ_BIT_KEYPAD);
+		}
+		else				// OR
+		{
+			if (~pad & k_cnt_selected) NDS_makeIrq(ARMCPU_ARM9,IRQ_BIT_KEYPAD);
+		}
+	}
+
+	k_cnt = ((u16 *)MMU.ARM7_REG)[0x132>>1];
+	if ( k_cnt & (1<<14))
+	{
+		//INFO("ARM7: KeyPad IRQ (pad 0x%04X, cnt 0x%04X (condition %s))\n", pad, k_cnt, k_cnt&(1<<15)?"AND":"OR");
+		u16 k_cnt_selected = (k_cnt & 0x3F);
+		if (k_cnt&(1<<15))	// AND
+		{
+			if ((~pad & k_cnt_selected) == k_cnt_selected) NDS_makeIrq(ARMCPU_ARM7,IRQ_BIT_KEYPAD);
+		}
+		else				// OR
+		{
+			if (~pad & k_cnt_selected) NDS_makeIrq(ARMCPU_ARM7,IRQ_BIT_KEYPAD);
+		}
+	}
+
+	padExt |= (((u16 *)MMU.ARM7_REG)[0x136>>1] & 0x0070);
+	
+	((u16 *)MMU.ARM7_REG)[0x136>>1] = (u16)padExt;
 }
 
 
 
 
-
-
-
-
-static void NDS_applyFinalInput()
+void NDS_applyFinalInput()
 {
-	const UserInput& input = NDS_getFinalUserInput();
+	const UserInput& input = NDS_getRawUserInput(); // NDS_getFinalUserInput();
 
 	u16	pad	= (0 |
 		((input.buttons.A ? 0 : 0x80) >> 7) |
@@ -2668,26 +2991,6 @@ static void NDS_applyFinalInput()
 	padExt |= (((u16 *)MMU.ARM7_REG)[0x136>>1] & 0x0070);
 	
 	((u16 *)MMU.ARM7_REG)[0x136>>1] = (u16)padExt;
-
-	//InputDisplayString=MakeInputDisplayString(padExt, pad);
-
-	//put into the format we want for the movie system
-	//fRLDUTSBAYXWEg
-	//we don't really need nds.pad anymore, but removing it would be a pain
-
- 	nds.pad =
-		((input.buttons.R ? 1 : 0) << 12)|
-		((input.buttons.L ? 1 : 0) << 11)|
-		((input.buttons.D ? 1 : 0) << 10)|
-		((input.buttons.U ? 1 : 0) << 9)|
-		((input.buttons.T ? 1 : 0) << 8)|
-		((input.buttons.S ? 1 : 0) << 7)|
-		((input.buttons.B ? 1 : 0) << 6)|
-		((input.buttons.A ? 1 : 0) << 5)|
-		((input.buttons.Y ? 1 : 0) << 4)|
-		((input.buttons.X ? 1 : 0) << 3)|
-		((input.buttons.W ? 1 : 0) << 2)|
-		((input.buttons.E ? 1 : 0) << 1);
 }
 
 
@@ -2775,7 +3078,4 @@ bool ValidateSlot2Access(u32 procnum, u32 demandSRAMSpeed, u32 demand1stROMSpeed
 	return true;
 }
 
-//these templates needed to be instantiated manually
-template void NDS_exec<FALSE>(s32 nb);
-template void NDS_exec<TRUE>(s32 nb);
 

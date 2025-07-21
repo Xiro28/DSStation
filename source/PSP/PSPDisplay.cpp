@@ -65,6 +65,12 @@ struct DispVertexColored
 	signed short x, y, z; 
 };
 
+struct DispVertexColoredNT
+{
+	unsigned short color;
+	signed short x, y, z; 
+};
+
 class Icon
 {
 
@@ -210,7 +216,9 @@ void drawmenu()
 
 const float sw = 511;
 static const int scale = (int)(sw * (float)SLICE_SIZE) / (float)512;
-struct DispVertexColored *screen_gpuvtx;
+struct DispVertexColored *full_gpuvtx;
+struct DispVertexColoredNT *bck_gpuvtx;
+struct DispVertex *sprt_gpuvtx;
 struct DispVertex *icons_gpuvtx;
 struct DispVertex mouse_vtx[2];
 int n_slices = 0;
@@ -221,37 +229,60 @@ void SetupDisplay(int dx)
 	{
 		int width = (start + SLICE_SIZE) < end ? SLICE_SIZE : end - start;
 
-		screen_gpuvtx[idx].u = start;
-		screen_gpuvtx[idx].v = 0;
-		screen_gpuvtx[idx].x = dx;
-		screen_gpuvtx[idx].y = 40;
-		screen_gpuvtx[idx].z = 0;
+		sprt_gpuvtx[idx].u = start;
+		sprt_gpuvtx[idx].v = 0;
+		sprt_gpuvtx[idx].x = dx;
+		sprt_gpuvtx[idx].y = 40;
+		sprt_gpuvtx[idx].z = 0;
 
-		screen_gpuvtx[idx + 1].u = start + width;
-		screen_gpuvtx[idx + 1].v = 192;
-		screen_gpuvtx[idx + 1].x = dx + scale;
-		screen_gpuvtx[idx + 1].y = 192 + 40;
-		screen_gpuvtx[idx + 1].z = 0;
+		sprt_gpuvtx[idx + 1].u = start + width;
+		sprt_gpuvtx[idx + 1].v = 192;
+		sprt_gpuvtx[idx + 1].x = dx + scale;
+		sprt_gpuvtx[idx + 1].y = 192 + 40;
+		sprt_gpuvtx[idx + 1].z = 0;
 
-		screen_gpuvtx[idx].color = 0x8000;
-		screen_gpuvtx[idx + 1].color = 0x8000;
+		full_gpuvtx[idx].u = start;
+		full_gpuvtx[idx].v = 0;
+		full_gpuvtx[idx].x = dx;
+		full_gpuvtx[idx].y = 40;
+		full_gpuvtx[idx].z = 0;
 
-		icons_gpuvtx[idx].u = start;
-		icons_gpuvtx[idx].v = 0;
-		icons_gpuvtx[idx].x = dx;
-		icons_gpuvtx[idx].y = 40;
-		icons_gpuvtx[idx].z = 0;
+		full_gpuvtx[idx + 1].u = start + width;
+		full_gpuvtx[idx + 1].v = 192;
+		full_gpuvtx[idx + 1].x = dx + scale;
+		full_gpuvtx[idx + 1].y = 192 + 40;
+		full_gpuvtx[idx + 1].z = 0;
 
-		icons_gpuvtx[idx + 1].u = start + width;
-		icons_gpuvtx[idx + 1].v = 192;
-		icons_gpuvtx[idx + 1].x = dx + scale;
-		icons_gpuvtx[idx + 1].y = 192 + 40;
-		icons_gpuvtx[idx + 1].z = 0;
+		full_gpuvtx[idx].color = 0x8000;
+		full_gpuvtx[idx + 1].color = 0x8000;
+
 
 		idx += 2;
 
 		n_slices++;
 	}
+
+	bck_gpuvtx[0].x = 0;
+	bck_gpuvtx[0].y = 40;
+	bck_gpuvtx[0].z = 0;
+
+	bck_gpuvtx[1].x = 256;
+	bck_gpuvtx[1].y = 192 + 40;
+	bck_gpuvtx[1].z = 0;
+
+	bck_gpuvtx[0].color = 0x8000;
+	bck_gpuvtx[1].color = 0x8000;
+
+	bck_gpuvtx[2].x = 256;
+	bck_gpuvtx[2].y = 40;
+	bck_gpuvtx[2].z = 0;
+
+	bck_gpuvtx[3].x = 512;
+	bck_gpuvtx[3].y = 192 + 40;
+	bck_gpuvtx[3].z = 0;
+
+	bck_gpuvtx[2].color = 0x8000;
+	bck_gpuvtx[3].color = 0x8000;
 }
 
 void draw_mouse(int x, int y)
@@ -320,57 +351,93 @@ uint32_t simpleHash(const uint8_t* data, size_t size) {
     return hash;
 }
 
+extern bool bg0_3D_drawn;
+
 
 void EMU_SCREEN(bool skip2d, bool skip3d)
 {
 	static bool inited = false;
-	if (skip2d && skip3d)
-		return;
-
 	const bool do_3d = ((((REG_DISPx*)&MMU.ARM9_REG[0])->dispx_DISPCNT.bits.BG0_3D)) && !skip3d;
-	
-	sceGuSync(0, 0);
+
+	if (skip2d && !do_3d)
+		return;
 
 	const u16 _color_main = (T1ReadWord(MMU.ARM9_VMEM, MainScreen.gpu->core * 0x400) & 0x7FFF) | 0x8000;
 	const u16 _color_sub  = (T1ReadWord(MMU.ARM9_VMEM, SubScreen.gpu->core * 0x400) & 0x7FFF) | 0x8000;
 
+	sceGuSync(0, 0);
+	sceGuSwapBuffers();
 
-	//if (old_color_main != _color_main || old_color_sub != _color_sub || do_3d || simpleHash((const uint8_t*)DISP_POINTER, 192 * 256 * 4) != hash)
+	// 0x0400A000 is the addr in VRAM where the actual display buffer is
+	/*if (memcmp(&DISP_POINTER[0], (u8*)0x0400A000, 192*256*) == 0)
+	{
+		printf("Framebuffer is the same, skipping...\n");
+		return;
+	}*/
+
+
 	{
 
 		//hash = simpleHash((const uint8_t*)DISP_POINTER, 192 * 256 * 4);
 		sceGuStart(GU_DIRECT, gulist);
+		sceGuDrawBuffer(GU_PSM_5551, 0, GU_VRAM_WIDTH);
 
-		if (!skip2d)
+		if (do_3d)
 		{
-
-			//
-			
 			//printf("Num slices: %d\n", n_slices);
+			if (old_color_main != _color_main || old_color_sub != _color_sub){
+				for (int i = 0; i < 2; i++)
+				{
+					bck_gpuvtx[i].color = _color_main;
+					bck_gpuvtx[i + 2].color = _color_sub;
+				}
+
+				old_color_main = _color_main;
+				old_color_sub = _color_sub;
+			}
+
+			sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS_COLOR_NT, 4, NULL, &bck_gpuvtx[0]);
+
+			if (!my_config._3d_always_on_top)
+				gpu3D->NDS_3D_Render();
+
+			sceGuEnable(GU_ALPHA_TEST);
+			sceGuAlphaFunc(GU_GREATER, 0, 0xFF);
+
+			{
+				sceGuEnable(GU_TEXTURE_2D);
+				sceGuTexMode(GU_PSM_5551, 0, 0, 0);
+				sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+				sceGuTexImage(0, 512, 256, 512, (const u32 *)&DISP_POINTER[0]);
+				sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_slices * 2, NULL, &sprt_gpuvtx[0]);
+			}
+
+			sceGuDisable(GU_ALPHA_TEST);
+
+			if (my_config._3d_always_on_top)
+				gpu3D->NDS_3D_Render();
+		}else{
 			if (old_color_main != _color_main || old_color_sub != _color_sub){
 				for (int i = 0; i < n_slices; i++)
 				{
-					screen_gpuvtx[i].color = _color_main;
-					screen_gpuvtx[i + n_slices].color = _color_sub;
+					full_gpuvtx[i].color = _color_main;
+					full_gpuvtx[i + n_slices].color = _color_sub;
 				}
+
+				old_color_main = _color_main;
+				old_color_sub = _color_sub;
 			}
 
-			old_color_main = _color_main;
-			old_color_sub = _color_sub;
-
-			if (do_3d || !inited){
-				sceGuDrawBuffer(GU_PSM_5551, 0, GU_VRAM_WIDTH);
-				if (!my_config.cur) sceGuEnable(GU_TEXTURE_2D);
-				sceGuTexMode(GU_PSM_5551, 0, 0, 0);
-				sceGuTexFunc(GU_TFX_DECAL , GU_TCC_RGBA);
-				inited = true;
-			}
-
+			sceGuEnable(GU_TEXTURE_2D);
+			sceGuTexMode(GU_PSM_5551, 0, 0, 0);
+			sceGuTexFunc(GU_TFX_DECAL, GU_TCC_RGBA);
 			sceGuTexImage(0, 512, 256, 512, (const u32 *)&DISP_POINTER[0]);
-			sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS_COLOR, n_slices * 2, NULL, &screen_gpuvtx[0]);
+			sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS_COLOR, n_slices * 2, NULL, &full_gpuvtx[0]);
 		}
 
-		gpu3D->NDS_3D_Render();
+		
+
+		
 
 		// render mouse
 		if (my_config.cur)
@@ -387,10 +454,6 @@ void EMU_SCREEN(bool skip2d, bool skip3d)
 				0x7FFF, 0xFFFF, 0x8001, 0x0000, 0x0000, 0x8001, 0xFFFF, 0x7FFF,
 				0x0000, 0x7FFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x7FFF, 0x0000};
 
-			if (do_3d){
-				sceGuEnable(GU_TEXTURE_2D);
-				sceGuTexMode(GU_PSM_5551, 0, 0, 0);
-			}
 			sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
 			sceGuTexImage(0, 8, 8, 8, (const void *)&mouseCursor[0]);
 			draw_mouse(mouseX, mouseY);
@@ -462,7 +525,10 @@ void Init_PSP_DISPLAY_FRAMEBUFF()
 		return;
 	inited = true;
 
-	screen_gpuvtx = (struct DispVertexColored *)((u32)sceGuGetMemory(2 * SLICE_SIZE * sizeof(struct DispVertexColored)) + (u32)doubleBuffer);
+	full_gpuvtx = (struct DispVertexColored *)((u32)sceGuGetMemory(2 * SLICE_SIZE * sizeof(struct DispVertexColored)) + (u32)doubleBuffer);
+	sprt_gpuvtx = (struct DispVertex *)((u32)sceGuGetMemory(2 * SLICE_SIZE * sizeof(struct DispVertex)) + (u32)doubleBuffer + sizeof(struct DispVertexColored) * 64);
+	bck_gpuvtx = (struct DispVertexColoredNT *)((u32)sceGuGetMemory(2 * SLICE_SIZE * sizeof(struct DispVertexColoredNT)) + (u32)doubleBuffer + sizeof(struct DispVertex) * 128);
+
 	icons_gpuvtx = (struct DispVertex *)((u32)sceGuGetMemory(2 * SLICE_SIZE * sizeof(struct DispVertex)) + (u32)doubleBuffer);
 
 	static const char *font = "flash0:/font/ltn1.pgf";	// small font

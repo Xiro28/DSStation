@@ -399,7 +399,7 @@ static FORCEINLINE u32 MMU_LCDmap(u32 addr, bool& unmapped, bool& restricted)
 		int iwram_block_16k;
 		int iwram_offset = addr & 0x3FFF;
 		addr &= 0x00FFFFFF;
-		if(PROCNUM == ARMCPU_ARM7)
+		if constexpr (PROCNUM == ARMCPU_ARM7)
 		{
 			static const int arm7_siwram_blocks[2][4][4] =
 			{
@@ -454,11 +454,10 @@ static FORCEINLINE u32 MMU_LCDmap(u32 addr, bool& unmapped, bool& restricted)
 	}
 
 	//in case the address is entirely outside of the interesting VRAM ranges
-	if(addr < 0x06000000) return addr;
-	if(addr >= 0x07000000) return addr;
+	if(addr < 0x06000000 || addr >= 0x07000000) return addr;
 
 	//shared wram mapping for arm7
-	if(PROCNUM==ARMCPU_ARM7)
+	if constexpr (PROCNUM==ARMCPU_ARM7)
 	{
 		//necessary? not sure
 		//addr &= 0x3FFFF;
@@ -544,7 +543,8 @@ std::string VramConfiguration::describe() {
 }
 
 //maps the specified bank to LCDC
-static inline void MMU_vram_lcdc(const int bank)
+template<int bank>
+static inline void MMU_vram_lcdc()
 {
 	for(int i=0;i<vram_bank_info[bank].num_pages;i++)
 	{
@@ -554,7 +554,8 @@ static inline void MMU_vram_lcdc(const int bank)
 }
 
 //maps the specified bank to ARM9 at the provided page offset
-static inline void MMU_vram_arm9(const int bank, const int offset)
+template<int bank>
+static inline void MMU_vram_arm9(const int offset)
 {
 	for(int i=0;i<vram_bank_info[bank].num_pages;i++)
 	{
@@ -589,19 +590,19 @@ static inline void MMU_VRAMmapRefreshBank()
 			{
 			case 0: //LCDC
 				vramConfiguration.banks[bank].purpose = VramConfiguration::LCDC;
-				MMU_vram_lcdc(bank);
+				MMU_vram_lcdc<bank>();
 				if(ofs != 0) PROGINFO("Bank %i: MST %i OFS %i\n", mst, ofs);
 				break;
 			case 1: //ABG
 				vramConfiguration.banks[bank].purpose = VramConfiguration::ABG;
-				MMU_vram_arm9(bank,VRAM_PAGE_ABG+ofs*8);
+				MMU_vram_arm9<bank>(VRAM_PAGE_ABG+ofs*8);
 				break;
 			case 2: //AOBJ
 				vramConfiguration.banks[bank].purpose = VramConfiguration::AOBJ;
 				switch(ofs) {
 				case 0:
 				case 1:
-					MMU_vram_arm9(bank,VRAM_PAGE_AOBJ+ofs*8);
+					MMU_vram_arm9<bank>(VRAM_PAGE_AOBJ+ofs*8);
 					break;
 				default:
 					PROGINFO("Unsupported ofs setting %d for engine A OBJ vram bank %c\n", ofs, 'A'+bank);
@@ -610,6 +611,7 @@ static inline void MMU_VRAMmapRefreshBank()
 			case 3: //texture
 				vramConfiguration.banks[bank].purpose = VramConfiguration::TEX;
 				MMU.texInfo.textureSlotAddr[ofs] = MMU_vram_physical(vram_bank_info[bank].page_addr);
+				gpu3D->NDS_3D_VramReconfigureSignal();
 				break;
 			default: goto unsupported_mst;
 			}
@@ -623,12 +625,12 @@ static inline void MMU_VRAMmapRefreshBank()
 			{
 			case 0: //LCDC
 				vramConfiguration.banks[bank].purpose = VramConfiguration::LCDC;
-				MMU_vram_lcdc(bank);
+				MMU_vram_lcdc<bank>();
 				//if(ofs != 0) PROGINFO("Bank %i: MST %i OFS %i\n", mst, ofs);
 				break;
 			case 1: //ABG
 				vramConfiguration.banks[bank].purpose = VramConfiguration::ABG;
-				MMU_vram_arm9(bank,VRAM_PAGE_ABG+ofs*8);
+				MMU_vram_arm9<bank>(VRAM_PAGE_ABG+ofs*8);
 				break;
 			case 2: //arm7
 				vramConfiguration.banks[bank].purpose = VramConfiguration::ARM7;
@@ -648,14 +650,15 @@ static inline void MMU_VRAMmapRefreshBank()
 			case 3: //texture
 				vramConfiguration.banks[bank].purpose = VramConfiguration::TEX;
 				MMU.texInfo.textureSlotAddr[ofs] = MMU_vram_physical(vram_bank_info[bank].page_addr);
+				gpu3D->NDS_3D_VramReconfigureSignal();
 				break;
 			case 4: //BGB or BOBJ
 				if(bank == VRAM_BANK_C)  {
 					vramConfiguration.banks[bank].purpose = VramConfiguration::BBG;
-					MMU_vram_arm9(bank,VRAM_PAGE_BBG); //BBG
+					MMU_vram_arm9<bank>(VRAM_PAGE_BBG); //BBG
 				} else {
 					vramConfiguration.banks[bank].purpose = VramConfiguration::BOBJ;
-					MMU_vram_arm9(bank,VRAM_PAGE_BOBJ); //BOBJ
+					MMU_vram_arm9<bank>(VRAM_PAGE_BOBJ); //BOBJ
 				}
 				//if(ofs != 0) PROGINFO("Bank %i: MST %i OFS %i\n", mst, ofs);
 				break;
@@ -669,15 +672,15 @@ static inline void MMU_VRAMmapRefreshBank()
 			switch(mst) {
 			case 0: //LCDC
 				vramConfiguration.banks[bank].purpose = VramConfiguration::LCDC;
-				MMU_vram_lcdc(bank);
+				MMU_vram_lcdc<bank>();
 				break;
 			case 1: //ABG
 				vramConfiguration.banks[bank].purpose = VramConfiguration::ABG;
-				MMU_vram_arm9(bank,VRAM_PAGE_ABG);
+				MMU_vram_arm9<bank>(VRAM_PAGE_ABG);
 				break;
 			case 2: //AOBJ
 				vramConfiguration.banks[bank].purpose = VramConfiguration::AOBJ;
-				MMU_vram_arm9(bank,VRAM_PAGE_AOBJ);
+				MMU_vram_arm9<bank>(VRAM_PAGE_AOBJ);
 				break;
 			case 3: //texture palette
 				vramConfiguration.banks[bank].purpose = VramConfiguration::TEXPAL;
@@ -685,6 +688,7 @@ static inline void MMU_VRAMmapRefreshBank()
 				MMU.texInfo.texPalSlot[1] = MMU_vram_physical(vram_bank_info[bank].page_addr+1);
 				MMU.texInfo.texPalSlot[2] = MMU_vram_physical(vram_bank_info[bank].page_addr+2);
 				MMU.texInfo.texPalSlot[3] = MMU_vram_physical(vram_bank_info[bank].page_addr+3);
+				gpu3D->NDS_3D_VramReconfigureSignal();
 				break;
 			case 4: //A BG extended palette
 				vramConfiguration.banks[bank].purpose = VramConfiguration::ABGEXTPAL;
@@ -707,22 +711,23 @@ static inline void MMU_VRAMmapRefreshBank()
 			{
 			case 0: //LCDC
 				vramConfiguration.banks[bank].purpose = VramConfiguration::LCDC;
-				MMU_vram_lcdc(bank);
+				MMU_vram_lcdc<bank>();
 				//if(ofs != 0) PROGINFO("Bank %i: MST %i OFS %i\n", mst, ofs);
 				break;
 			case 1: //ABG
 				vramConfiguration.banks[bank].purpose = VramConfiguration::ABG;
-				MMU_vram_arm9(bank,VRAM_PAGE_ABG+pageofs);
-				MMU_vram_arm9(bank,VRAM_PAGE_ABG+pageofs+2); //unexpected mirroring (required by spyro eternal night)
+				MMU_vram_arm9<bank>(VRAM_PAGE_ABG+pageofs);
+				MMU_vram_arm9<bank>(VRAM_PAGE_ABG+pageofs+2); //unexpected mirroring (required by spyro eternal night)
 				break;
 			case 2: //AOBJ
 				vramConfiguration.banks[bank].purpose = VramConfiguration::AOBJ;
-				MMU_vram_arm9(bank,VRAM_PAGE_AOBJ+pageofs);
-				MMU_vram_arm9(bank,VRAM_PAGE_AOBJ+pageofs+2); //unexpected mirroring - I have no proof, but it is inferred from the ABG above
+				MMU_vram_arm9<bank>(VRAM_PAGE_AOBJ+pageofs);
+				MMU_vram_arm9<bank>(VRAM_PAGE_AOBJ+pageofs+2); //unexpected mirroring - I have no proof, but it is inferred from the ABG above
 				break;
 			case 3: //texture palette
 				vramConfiguration.banks[bank].purpose = VramConfiguration::TEXPAL;
 				MMU.texInfo.texPalSlot[pageofs] = MMU_vram_physical(vram_bank_info[bank].page_addr);
+				gpu3D->NDS_3D_VramReconfigureSignal();
 				break;
 			case 4: //A BG extended palette
 				switch(ofs) {
@@ -756,12 +761,12 @@ static inline void MMU_VRAMmapRefreshBank()
 			{
 			case 0: //LCDC
 				vramConfiguration.banks[bank].purpose = VramConfiguration::LCDC;
-				MMU_vram_lcdc(bank);
+				MMU_vram_lcdc<bank>();
 				break;
 			case 1: //BBG
 				vramConfiguration.banks[bank].purpose = VramConfiguration::BBG;
-				MMU_vram_arm9(bank,VRAM_PAGE_BBG);
-				MMU_vram_arm9(bank,VRAM_PAGE_BBG + 4); //unexpected mirroring
+				MMU_vram_arm9<bank>(VRAM_PAGE_BBG);
+				MMU_vram_arm9<bank>(VRAM_PAGE_BBG + 4); //unexpected mirroring
 				break;
 			case 2: //B BG extended palette
 				vramConfiguration.banks[bank].purpose = VramConfiguration::BBGEXTPAL;
@@ -781,17 +786,17 @@ static inline void MMU_VRAMmapRefreshBank()
 			{
 			case 0: //LCDC
 				vramConfiguration.banks[bank].purpose = VramConfiguration::LCDC;
-				MMU_vram_lcdc(bank);
+				MMU_vram_lcdc<bank>();
 				break;
 			case 1: //BBG
 				vramConfiguration.banks[bank].purpose = VramConfiguration::BBG;
-				MMU_vram_arm9(bank,VRAM_PAGE_BBG+2);
-				MMU_vram_arm9(bank,VRAM_PAGE_BBG+3); //unexpected mirroring
+				MMU_vram_arm9<bank>(VRAM_PAGE_BBG+2);
+				MMU_vram_arm9<bank>(VRAM_PAGE_BBG+3); //unexpected mirroring
 				break;
 			case 2: //BOBJ
 				vramConfiguration.banks[bank].purpose = VramConfiguration::BOBJ;
-				MMU_vram_arm9(bank,VRAM_PAGE_BOBJ);
-				MMU_vram_arm9(bank,VRAM_PAGE_BOBJ+1); //FF3 end scene (lens flare sprite) needs this as it renders a sprite off the end of the 16KB and back around
+				MMU_vram_arm9<bank>(VRAM_PAGE_BOBJ);
+				MMU_vram_arm9<bank>(VRAM_PAGE_BOBJ+1); //FF3 end scene (lens flare sprite) needs this as it renders a sprite off the end of the 16KB and back around
 				break;
 			case 3: //B OBJ extended palette
 				vramConfiguration.banks[bank].purpose = VramConfiguration::BOBJEXTPAL;
@@ -844,20 +849,32 @@ void MMU_VRAM_unmap_all()
 		MMU.texInfo.textureSlotAddr[i] = MMU.blank_memory;
 }
 
-static inline void MMU_VRAMmapControl(u8 block, u8 VRAMBankCnt)
+template <int t>
+constexpr void map_unexpected(){
+	constexpr int types[] = {VRAM_PAGE_ABG,VRAM_PAGE_BBG,VRAM_PAGE_AOBJ,VRAM_PAGE_BOBJ};
+	constexpr int sizes[] = {32,8,16,8};
+
+	constexpr int size = sizes[t]; //in 16KB pages
+	constexpr int basePage = types[t]; //base page in the vram_arm
+
+	constexpr int mask = size - 1;
+
+	for(int i=size;i<128;i++)
+	{
+		const int page = basePage + i;
+		vram_arm9_map[page] = vram_arm9_map[basePage+(i&mask)];
+	}
+}
+
+template <u8 block>
+static inline void MMU_VRAMmapControl(u8 VRAMBankCnt)
 {
 	//handle WRAM, first of all
-	if(block == 7)
+	if constexpr (block == 7)
 	{
 		MMU.WRAMCNT = VRAMBankCnt & 3;
 		return;
 	}
-
-	//sceKernelDcacheWritebackInvalidateAll();
-	//if (FrameRendered <= 0) return; //ME hasn't finished to render so skip 
-
-	//first, save the texture info so we can check it for changes and trigger purges of the texcache
-	MMU_struct::TextureInfo oldTexInfo = MMU.texInfo;
 
 	//unmap everything
 	//MMU_VRAM_unmap_all();
@@ -878,31 +895,28 @@ static inline void MMU_VRAMmapControl(u8 block, u8 VRAMBankCnt)
 	//goblet of fire "care of magical creatures" maps I and D to BOBJ (the I is an accident)
 	//and requires A to override it.
 	//This may create other bugs....
-	MMU_VRAMmapRefreshBank<VRAM_BANK_I>();
-	MMU_VRAMmapRefreshBank<VRAM_BANK_H>();
-	MMU_VRAMmapRefreshBank<VRAM_BANK_G>();
-	MMU_VRAMmapRefreshBank<VRAM_BANK_F>();
-	MMU_VRAMmapRefreshBank<VRAM_BANK_E>();
 
-	//zero 21-jun-2012
-	//tomwi's streaming music demo sets A and D to ABG (the A is an accident).
-	//in this case, D should get priority. 
-	//this is somewhat risky. will it break other things?
-	MMU_VRAMmapRefreshBank<VRAM_BANK_A>();
-	MMU_VRAMmapRefreshBank<VRAM_BANK_B>();
-	MMU_VRAMmapRefreshBank<VRAM_BANK_C>();
-	MMU_VRAMmapRefreshBank<VRAM_BANK_D>();
+	if constexpr(block >= VRAM_BANK_E)
+	{
+		MMU_VRAMmapRefreshBank<VRAM_BANK_I>();
+		MMU_VRAMmapRefreshBank<VRAM_BANK_H>();
+		MMU_VRAMmapRefreshBank<VRAM_BANK_G>();
+		MMU_VRAMmapRefreshBank<VRAM_BANK_F>();
+		MMU_VRAMmapRefreshBank<VRAM_BANK_E>();
+	}
+	else{
+		//zero 21-jun-2012
+		//tomwi's streaming music demo sets A and D to ABG (the A is an accident).
+		//in this case, D should get priority. 
+		//this is somewhat risky. will it break other things?
+		MMU_VRAMmapRefreshBank<VRAM_BANK_A>();
+		MMU_VRAMmapRefreshBank<VRAM_BANK_B>();
+		MMU_VRAMmapRefreshBank<VRAM_BANK_C>();
+		MMU_VRAMmapRefreshBank<VRAM_BANK_D>();
+	}
 
 	//printf(vramConfiguration.describe().c_str());
 	//printf("vram remapped at vcount=%d\n",nds.hw_status.VCount);
-
-	//if texInfo changed, trigger notifications
-	if(memcmp(&oldTexInfo,&MMU.texInfo,sizeof(MMU_struct::TextureInfo)))
-	{
-		//if(!nds.isIn3dVblank())
-	//		PROGINFO("Changing texture or texture palette mappings outside of 3d vblank\n");
-		gpu3D->NDS_3D_VramReconfigureSignal();
-	}
 
 	//-------------------------------
 	//set up arm9 mirrorings
@@ -919,44 +933,12 @@ static inline void MMU_VRAMmapControl(u8 block, u8 VRAMBankCnt)
 	//...
 	//note that the "unexpected mirroring" items above may at some point rely on being executed in a certain order.
 	//(sequentially A..I)
+
+	map_unexpected<0>();
+	map_unexpected<1>();
+	map_unexpected<2>();
+	map_unexpected<3>();
 	
-
-	const int types[] = {VRAM_PAGE_ABG,VRAM_PAGE_BBG,VRAM_PAGE_AOBJ,VRAM_PAGE_BOBJ};
-	const int sizes[] = {32,8,16,8};
-	for(int t=0;t<4;t++)
-	{
-		//the idea here is to pad out the mirrored space with copies of the mappable area,
-		//without respect to what is mapped within that mappable area.
-		//we hope that this is correct in all cases
-		//required for driller spirits in mission select (mapping is simple A,B,C,D to each purpose)
-		const int size = sizes[t];
-		const int mask = size-1;
-		const int type = types[t];
-		for(int i=size;i<128;i++)
-		{
-			const int page = type + i;
-			vram_arm9_map[page] = vram_arm9_map[type+(i&mask)];
-		}
-
-		//attempt #1: screen corruption in drill spirits EU
-		//it seems like these shouldnt pad out 128K banks (space beyond those should have remained unmapped)
-		//int mirrorMask = -1;
-		//int type = types[t];
-		////if(type==VRAM_PAGE_BOBJ) continue;
-		//if(type==VRAM_PAGE_AOBJ) continue;
-		//for(int i=0;i<128;i++)
-		//{
-		//	int page = type + i;
-		//	if(vram_arm9_map[page] == VRAM_PAGE_UNMAPPED)
-		//	{
-		//		if(i==0) break; //can't mirror anything if theres nothing mapped!
-		//		if(mirrorMask == -1)
-		//			mirrorMask = i-1;
-		//		vram_arm9_map[page] = vram_arm9_map[type+(i&mirrorMask)];
-		//	}
-		//}
-	}
-
 	//-------------------------------
 }
 
@@ -1121,7 +1103,7 @@ void MMU_Reset()
 	MainScreen.offset = 0;
 	SubScreen.offset  = 192;
 	
-	MMU_VRAM_unmap_all();
+	//MMU_VRAM_unmap_all();
 	arm_jit_reset(true, true);
 
 	MMU.powerMan_CntReg = 0x00;
@@ -1131,10 +1113,17 @@ void MMU_Reset()
 	MMU.powerMan_Reg[2] = 0x01;
 	MMU.powerMan_Reg[3] = 0x00;
 
+	printf("MMU rtc reset\n");
 	rtcInit();
 	partie = 1;
+
+	printf("MMU slot1 reset\n");
 	slot1_Reset();
+
+	printf("MMU slot2 reset\n");
 	slot2_Reset();
+
+	printf("MMU mic reset\n");
 	
     //HCF v0.87
     Mic_Reset();
@@ -1146,6 +1135,8 @@ void MMU_Reset()
 	MMU.dscard[1].transfer_count = 0;
 	MMU.dscard[1].mode = eCardMode_RAW;
 
+	printf("MMU new reset\n");
+
 	reconstruct(&MMU_new);
 
 	MMU_timing.arm7codeFetch.Reset();
@@ -1154,6 +1145,8 @@ void MMU_Reset()
 	MMU_timing.arm9dataFetch.Reset();
 	MMU_timing.arm9codeCache.Reset();
 	MMU_timing.arm9dataCache.Reset();
+
+	printf("MMU fine\n");
 }
 
 void SetupMMU(bool debugConsole, bool dsi) {
@@ -1167,6 +1160,29 @@ void SetupMMU(bool debugConsole, bool dsi) {
 
 std::map<u64, u32> cached_sqrt;
 
+constexpr uint32_t isqrt_constexpr(uint64_t n) {
+    if (n < 2)
+        return static_cast<uint32_t>(n);
+    uint64_t x = n;
+    uint64_t y = (x + 1) >> 1; // (x + 1) / 2
+    while (y < x) {
+        x = y;
+        y = (x + n / x) >> 1;
+    }
+    return static_cast<uint32_t>(x);
+}
+
+constexpr size_t SQRT_TABLE_SIZE = 2000;
+constexpr std::array<uint32_t, SQRT_TABLE_SIZE> generateSqrtTable() {
+    std::array<uint32_t, SQRT_TABLE_SIZE> table = {};
+    for (size_t i = 0; i < SQRT_TABLE_SIZE; ++i) {
+        table[i] = isqrt_constexpr(i);
+    }
+    return table;
+}
+constexpr std::array<uint32_t, SQRT_TABLE_SIZE> sqrt_table = generateSqrtTable();
+
+
 static void execsqrt() {
 	u32 ret;
 	const u8 mode = MMU_new.sqrt.mode;
@@ -1175,23 +1191,29 @@ static void execsqrt() {
 	if (mode) { 
 		const u64 v = T1ReadQuad(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x2B8);
 		//ret = isqrt(v);
-		ret = cached_sqrt[v];
-
-		if (!ret && v != 0) {
-			ret = isqrt(v);
-			cached_sqrt[v] = ret;
-		}
+		if (v < SQRT_TABLE_SIZE) {
+            ret = sqrt_table[static_cast<size_t>(v)];
+        } else {
+            // Fallback: try to use the dynamic cache.
+            ret = cached_sqrt[v];
+            if (!ret && v != 0) {
+                ret = isqrt(v);
+                cached_sqrt[v] = ret;
+            }
+        }
 
 	} else {
 		const u32 v = T1ReadLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x2B8);
 		
-		//ret = isqrt(v);
-		ret = cached_sqrt[v];
-
-		if (!ret && v != 0){
-			ret = isqrt(v);
-			cached_sqrt[v] = ret;
-		}
+		if (v < SQRT_TABLE_SIZE) {
+            ret = sqrt_table[v];
+        } else {
+            ret = cached_sqrt[v];
+            if (!ret && v != 0) {
+                ret = isqrt(v);
+                cached_sqrt[v] = ret;
+            }
+        }
 	}
 
 	//clear the result while the sqrt unit is busy
@@ -1539,7 +1561,7 @@ void FASTCALL MMU_writeToGCControl(u32 val)
 	T1WriteLong(MMU.MMU_MEM[PROCNUM][0x40], 0x1A4, val);
 
 	// Launch DMA if start flag was set to "DS Cart"
-	triggerDma(EDMAMode_Card);
+	triggerDma<EDMAMode_Card>();
 	
 	//
 	//NDS_RescheduleReadSlot1(PROCNUM,blocksize);
@@ -1897,7 +1919,7 @@ static void validateIF_arm9()
 {
 }
 
-template<int PROCNUM> static void REG_IF_WriteByte(u32 addr, u8 val)
+template<int PROCNUM, u32 addr> static void REG_IF_WriteByte(u8 val)
 {
 	//the following bits are generated from logic and should not be affected here
 	//Bit 21    NDS9 only: Geometry Command FIFO
@@ -1905,8 +1927,8 @@ template<int PROCNUM> static void REG_IF_WriteByte(u32 addr, u8 val)
 	//arm7: IF &= ~0x00000000;
 	//UPDATE IN setIF() ALSO!!!!!!!!!!!!!!!!
 	//UPDATE IN mmu_loadstate ALSO!!!!!!!!!!!!
-	if (addr==2) {
-		if(PROCNUM==ARMCPU_ARM9)
+	if constexpr (addr==2) {
+		if constexpr (PROCNUM==ARMCPU_ARM9)
 			val &= ~0x20;
 		else
 			val &= ~0x00;
@@ -1919,18 +1941,18 @@ template<int PROCNUM> static void REG_IF_WriteByte(u32 addr, u8 val)
 	NDS_Reschedule();
 }
 
-template<int PROCNUM> static void REG_IF_WriteWord(u32 addr,u16 val)
+template<int PROCNUM, int addr> static void REG_IF_WriteWord(u16 val)
 {
-	REG_IF_WriteByte<PROCNUM>(addr,val&0xFF);
-	REG_IF_WriteByte<PROCNUM>(addr+1,(val>>8)&0xFF);
+	REG_IF_WriteByte<PROCNUM, addr>(val&0xFF);
+	REG_IF_WriteByte<PROCNUM, addr + 1>((val>>8)&0xFF);
 }
 
 template<int PROCNUM> static void REG_IF_WriteLong(u32 val)
 {
-	REG_IF_WriteByte<PROCNUM>(0,val&0xFF);
-	REG_IF_WriteByte<PROCNUM>(1,(val>>8)&0xFF);
-	REG_IF_WriteByte<PROCNUM>(2,(val>>16)&0xFF);
-	REG_IF_WriteByte<PROCNUM>(3,(val>>24)&0xFF);
+	REG_IF_WriteByte<PROCNUM, 0>(val&0xFF);
+	REG_IF_WriteByte<PROCNUM, 1>((val>>8)&0xFF);
+	REG_IF_WriteByte<PROCNUM, 2>((val>>16)&0xFF);
+	REG_IF_WriteByte<PROCNUM, 3>((val>>24)&0xFF);
 }
 
 template<int PROCNUM>
@@ -2094,9 +2116,6 @@ static INLINE void MMU_IPCSync(u8 proc, u32 val)
 	IPCSync7 |= ((val & 0x0F00) >> 8);
 	IPCSync9 &= 0xB0FF;
 	IPCSync9 |= (val & 0x4F00);
-
-	if ((val & 0x2000) && (IPCSync7 & 0x4000))
-		NDS_makeIrq(1, IRQ_BIT_IPCSYNC);
 
 	HLE_IPCSYNC();
 
@@ -2504,10 +2523,10 @@ void DmaController::exec()
 }
 
 enum class MemoryRegion : u8 {
-    BIOS   = 0x00,
+    ITCM   = 0x00,
     Unused = 0x01,
-    eWRAM  = 0x02,
-    iWRAM  = 0x03,
+    MainRAM  = 0x02,
+    WRAM     = 0x03,
     IO     = 0x04,
     PAL    = 0x05,
     VRAM   = 0x06,
@@ -2543,7 +2562,7 @@ T * GetMemPtr(u32 addr, const u32 inc){
 			addr = MMU_LCDmap<proc>(addr, unmapped, restricted);
 			if (unmapped || restricted) return nullptr;
 		}
-        case MemoryRegion::eWRAM:
+        case MemoryRegion::MainRAM:
 			if(proc==ARM9 && addr>>12 == 0x21d7) return nullptr;
 
 			return reinterpret_cast<T*>(MMU.MMU_MEM[proc][addr >> 20] + (addr & MMU.MMU_MASK[proc][addr>>20]));
@@ -2551,10 +2570,11 @@ T * GetMemPtr(u32 addr, const u32 inc){
         case MemoryRegion::OAM:
             return reinterpret_cast<T*>(&MMU.ARM9_OAM[addr & 0x7ff]);
 
-		
+		case MemoryRegion::WRAM:
+			return reinterpret_cast<T*>(MMU.SWIRAM[addr & 0x7FFF]);
+
         case MemoryRegion::IO:
-		case MemoryRegion::iWRAM:
-		case MemoryRegion::BIOS:
+		case MemoryRegion::ITCM:
         case MemoryRegion::ROM_L1:
         case MemoryRegion::ROM_L2:
         case MemoryRegion::ROM_L:
@@ -2623,7 +2643,7 @@ void TransferMemory(u32& saddr, u32& daddr, int todo, const T srcinc, const T ds
 				}
 			}
 		
-		}else */if (srcinc == 0 && dst_ptr && dstinc > 0){
+		}else if (srcinc == 0 && dst_ptr && dstinc > 0){
 			
 			T val = src_ptr ? *src_ptr : 0;
 
@@ -2633,18 +2653,32 @@ void TransferMemory(u32& saddr, u32& daddr, int todo, const T srcinc, const T ds
 			memset(dst_ptr, val, todo);
 			daddr += dstinc * todo;
 		}
-		else if (src_ptr && dst_ptr) {
+		else */
+		if (src_ptr && dst_ptr) {
 
-			if (srcinc > 0 && dstinc > 0) {
+			if ((daddr >> 24) == 0x2) {
+				memset(&JIT_COMPILED_FUNC_KNOWNBANK(daddr, MAIN_MEM, (SZ == 4) ? _MMU_MAIN_MEM_MASK32 : _MMU_MAIN_MEM_MASK16, 0),
+					0, todo);
+				memset(&JIT_COMPILED_FUNC_KNOWNBANK(daddr, MAIN_MEM, (SZ == 4) ? _MMU_MAIN_MEM_MASK32 : _MMU_MAIN_MEM_MASK16, 1),
+					0, todo);
+			}
+
+			if (srcinc == dstinc) {
+				if (srcinc < 0 && dstinc < 0){
+					src_ptr -= todo - 1;
+					dst_ptr -= todo - 1;
+				}
+
 				memcpy_vfpu(dst_ptr, src_ptr, static_cast<size_t>(todo) * SZ);
-			} else {
+
+			}else{
 				for (int i = 0; i < todo; ++i) {
 					*dst_ptr = *src_ptr;
 					src_ptr += srcinc;
 					dst_ptr += dstinc;
-				}
+				} 
 			}
-
+			
 			saddr += srcinc * todo;
 			daddr += dstinc * todo;
 		} else if (src_ptr) {
@@ -2743,14 +2777,20 @@ void DmaController::doCopy()
 
 	// check if we can skip the DMA
 	switch (static_cast<MemoryRegion>(daddr >> 24)) {
-        case MemoryRegion::BIOS:
+        case MemoryRegion::ITCM:
         case MemoryRegion::Unused:
 			dst += dstinc * todo;
 			src += srcinc * todo;
         break;
 
+		// TODO Check gxfifo dma in order to speed up 3d games
+
 		default:
-			if constexpr (sz == 4) {
+			if (daddr&(~0x3FFF) == MMU.DTCMRegion || (saddr&(~0x3FFF) == MMU.DTCMRegion)) {
+				dst += dstinc * todo;
+				src += srcinc * todo;
+			}
+			else if constexpr (sz == 4) {
 				TransferMemory<uint32_t, PROCNUM>(src, dst, todo, srcinc, dstinc);
 			} else if constexpr (sz == 2) {
 				TransferMemory<uint16_t, PROCNUM>(src, dst, todo, srcinc, dstinc);
@@ -2780,31 +2820,6 @@ void DmaController::doCopy()
 		else
 			wordcount -= todo;
 	}
-}
-
-void triggerDma(EDMAMode mode)
-{
-	MACRODO4(0, {
-		const int j=X;
-		MMU_new.dma[0][j].tryTrigger(mode);
-	});
-	
-	/*MACRODO4(0, {
-		const int j=X;
-		MMU_new.dma[1][j].tryTrigger(mode);
-	});*/
-}
-
-void DmaController::tryTrigger(EDMAMode mode)
-{
-	if(startmode != mode) return;
-	if(!enable) return;
-
-	//hmm dont trigger it if its already running! 
-	//but paused things need triggers to continue
-	if(running && !paused) return; 
-	triggered = TRUE;
-	doSchedule();
 }
 
 void DmaController::doSchedule()
@@ -3846,10 +3861,10 @@ void FASTCALL _MMU_ARM9_write08(u32 adr, u8 val)
 			case REG_DISPA_DISP3DCNT: writereg_DISP3DCNT(8,adr,val); return;
 			case REG_DISPA_DISP3DCNT+1: writereg_DISP3DCNT(8,adr,val); return;
 
-			case REG_IF: REG_IF_WriteByte<ARMCPU_ARM9>(0,val); break;
-			case REG_IF+1: REG_IF_WriteByte<ARMCPU_ARM9>(1,val); break;
-			case REG_IF+2: REG_IF_WriteByte<ARMCPU_ARM9>(2,val); break;
-			case REG_IF+3: REG_IF_WriteByte<ARMCPU_ARM9>(3,val); break;
+			case REG_IF: REG_IF_WriteByte<ARMCPU_ARM9, 0>(val); break;
+			case REG_IF+1: REG_IF_WriteByte<ARMCPU_ARM9, 1>(val); break;
+			case REG_IF+2: REG_IF_WriteByte<ARMCPU_ARM9, 2>(val); break;
+			case REG_IF+3: REG_IF_WriteByte<ARMCPU_ARM9, 3>(val); break;
 
 			case eng_3D_CLEAR_COLOR+0: case eng_3D_CLEAR_COLOR+1:
 			case eng_3D_CLEAR_COLOR+2: case eng_3D_CLEAR_COLOR+3:
@@ -3857,17 +3872,35 @@ void FASTCALL _MMU_ARM9_write08(u32 adr, u8 val)
 				break;
 
 			case REG_VRAMCNTA:
+				MMU_VRAMmapControl<0>(val);
+			break;
 			case REG_VRAMCNTB:
+				MMU_VRAMmapControl<1>(val);
+			break;
 			case REG_VRAMCNTC:
+				MMU_VRAMmapControl<2>(val);
+			break;
 			case REG_VRAMCNTD:
+				MMU_VRAMmapControl<3>(val);
+			break;
 			case REG_VRAMCNTE:
+				MMU_VRAMmapControl<4>(val);
+			break;
 			case REG_VRAMCNTF:
+				MMU_VRAMmapControl<5>(val);
+			break;
 			case REG_VRAMCNTG:
+				MMU_VRAMmapControl<6>(val);
+			break;
 			case REG_WRAMCNT:
+				MMU_VRAMmapControl<7>(val);
+			break;
 			case REG_VRAMCNTH:
+				MMU_VRAMmapControl<8>(val);
+			break;
 			case REG_VRAMCNTI:
-					MMU_VRAMmapControl(adr-REG_VRAMCNTA, val);
-				break;
+				MMU_VRAMmapControl<9>(val);
+			break;
 
 			case REG_DISPA_DISPMMEMFIFO:
 			{
@@ -4031,8 +4064,8 @@ void FASTCALL _MMU_ARM9_write16(u32 adr, u16 val)
 			}
 
 			case REG_DIVCNT:
-				MMU_new.div.write16(val);
-				execdiv();
+					MMU_new.div.write16(val);
+					execdiv();
 				return;
 #if 1
 			case REG_DIVNUMER:
@@ -4239,13 +4272,25 @@ void FASTCALL _MMU_ARM9_write16(u32 adr, u16 val)
 				return;
 
 			case REG_VRAMCNTA:
+				MMU_VRAMmapControl<0>(val& 0xFF);
+				MMU_VRAMmapControl<1>(val >> 8);
+			break;
 			case REG_VRAMCNTC:
+				MMU_VRAMmapControl<2>(val& 0xFF);
+				MMU_VRAMmapControl<3>(val >> 8);
+			break;
 			case REG_VRAMCNTE:
+				MMU_VRAMmapControl<4>(val& 0xFF);
+				MMU_VRAMmapControl<5>(val >> 8);
+			break;
 			case REG_VRAMCNTG:
+				MMU_VRAMmapControl<6>(val& 0xFF);
+				MMU_VRAMmapControl<7>(val >> 8);
+			break;
 			case REG_VRAMCNTH:
-				MMU_VRAMmapControl(adr-REG_VRAMCNTA, val & 0xFF);
-				MMU_VRAMmapControl(adr-REG_VRAMCNTA+1, val >> 8);
-				break;
+				MMU_VRAMmapControl<8>(val& 0xFF);
+				MMU_VRAMmapControl<9>(val >> 8);
+			break;
 
 			case REG_IME:
 				NDS_Reschedule();
@@ -4260,8 +4305,8 @@ void FASTCALL _MMU_ARM9_write16(u32 adr, u16 val)
 				NDS_Reschedule();
 				MMU.reg_IE[ARMCPU_ARM9] = (MMU.reg_IE[ARMCPU_ARM9]&0xFFFF) | (((u32)val)<<16);
 				return;
-			case REG_IF: REG_IF_WriteWord<ARMCPU_ARM9>(0,val); return;
-			case REG_IF+2: REG_IF_WriteWord<ARMCPU_ARM9>(2,val); return;
+			case REG_IF: REG_IF_WriteWord<ARMCPU_ARM9, 0>(val); return;
+			case REG_IF+2: REG_IF_WriteWord<ARMCPU_ARM9, 2>(val); return;
 
             case REG_IPCSYNC:
 				MMU_IPCSync(ARMCPU_ARM9, val);
@@ -4655,15 +4700,21 @@ void FASTCALL _MMU_ARM9_write32(u32 adr, u32 val)
 				return;
 
 			case REG_VRAMCNTA:
+				MMU_VRAMmapControl<0>(val & 0xFF);
+				MMU_VRAMmapControl<1>((val >> 8) & 0xFF);
+				MMU_VRAMmapControl<2>((val >> 16) & 0xFF);
+				MMU_VRAMmapControl<3>((val >> 24) & 0xFF);
+			break;
+
 			case REG_VRAMCNTE:
-				MMU_VRAMmapControl(adr-REG_VRAMCNTA, val & 0xFF);
-				MMU_VRAMmapControl(adr-REG_VRAMCNTA+1, (val >> 8) & 0xFF);
-				MMU_VRAMmapControl(adr-REG_VRAMCNTA+2, (val >> 16) & 0xFF);
-				MMU_VRAMmapControl(adr-REG_VRAMCNTA+3, (val >> 24) & 0xFF);
-				break;
+				MMU_VRAMmapControl<4>(val & 0xFF);
+				MMU_VRAMmapControl<5>((val >> 8) & 0xFF);
+				MMU_VRAMmapControl<6>((val >> 16) & 0xFF);
+				MMU_VRAMmapControl<7>((val >> 24) & 0xFF);
+			break;
 			case REG_VRAMCNTH:
-				MMU_VRAMmapControl(adr-REG_VRAMCNTA, val & 0xFF);
-				MMU_VRAMmapControl(adr-REG_VRAMCNTA+1, (val >> 8) & 0xFF);
+				MMU_VRAMmapControl<8>(val & 0xFF);
+				MMU_VRAMmapControl<9>((val >> 8) & 0xFF);
 				break;
 
 			case REG_IME : 
@@ -4692,36 +4743,48 @@ void FASTCALL _MMU_ARM9_write32(u32 adr, u32 val)
 			}
 
 			case REG_DIVNUMER:
-				T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x290, val);
-				execdiv();
+				if (T1ReadLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x290) != val){
+					T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x290, val);
+					execdiv();
+				}
 				return;
 			case REG_DIVNUMER+4:
-				T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x294, val);
-				execdiv();
+				if (T1ReadLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x294) != val){
+					T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x294, val);
+					execdiv();
+				}				
 				return;
 
             case REG_DIVDENOM :
 				{
-					T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x298, val);
-					execdiv();
+					if (T1ReadLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x298) != val){
+						T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x298, val);
+						execdiv();
+					}				
 					return;
 				}
 			case REG_DIVDENOM+4 :
 				{
-					T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x29C, val);
-					execdiv();
+					if (T1ReadLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x29C) != val){
+						T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x29C, val);
+						execdiv();
+					}				
 					return;
 				}
 
 			case REG_SQRTPARAM :
 			{
-				T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x2B8, val);
-				execsqrt();
+				if (T1ReadLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x2B8) != val){
+					T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x2B8, val);
+					execsqrt();
+				}
 				return;
 			}
 			case REG_SQRTPARAM+4 :
+			if (T1ReadLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x2BC) != val){
 				T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x2BC, val);
 				execsqrt();
+			}
 				return;
 			
 			case REG_IPCSYNC:
@@ -4801,7 +4864,7 @@ u8 FASTCALL _MMU_ARM9_read08(u32 adr)
 {
 	adr &= 0x0FFFFFFF;
 	
-	mmu_log_debug_ARM9(adr, "(read08) 0x%02X", MMU.MMU_MEM[ARMCPU_ARM9][(adr>>20)&0xFF][adr&MMU.MMU_MASK[ARMCPU_ARM9][(adr>>20)&0xFF]]);
+	//mmu_log_debug_ARM9(adr, "(read08) 0x%02X", MMU.MMU_MEM[ARMCPU_ARM9][(adr>>20)&0xFF][adr&MMU.MMU_MASK[ARMCPU_ARM9][(adr>>20)&0xFF]]);
 
 	if(adr<0x02000000)
 		return T1ReadByte(MMU.ARM9_ITCM, adr&0x7FFF);
@@ -5218,10 +5281,10 @@ void FASTCALL _MMU_ARM7_write08(u32 adr, u8 val)
 
 		switch(adr)
 		{
-			case REG_IF: REG_IF_WriteByte<ARMCPU_ARM7>(0,val); break;
-			case REG_IF+1: REG_IF_WriteByte<ARMCPU_ARM7>(1,val); break;
-			case REG_IF+2: REG_IF_WriteByte<ARMCPU_ARM7>(2,val); break;
-			case REG_IF+3: REG_IF_WriteByte<ARMCPU_ARM7>(3,val); break;
+			case REG_IF: REG_IF_WriteByte<ARMCPU_ARM7, 0>(val); break;
+			case REG_IF+1: REG_IF_WriteByte<ARMCPU_ARM7, 1>(val); break;
+			case REG_IF+2: REG_IF_WriteByte<ARMCPU_ARM7, 2>(val); break;
+			case REG_IF+3: REG_IF_WriteByte<ARMCPU_ARM7, 3>(val); break;
 
 			case REG_POSTFLG:
 				//printf("ARM7: write POSTFLG %02X PC:0x%08X\n", val, NDS_ARM7.instruct_adr);
@@ -5434,8 +5497,8 @@ void FASTCALL _MMU_ARM7_write16(u32 adr, u16 val)
 				MMU.reg_IE[ARMCPU_ARM7] = (MMU.reg_IE[ARMCPU_ARM7]&0xFFFF) | (((u32)val)<<16);
 				return;
 				
-			case REG_IF: REG_IF_WriteWord<ARMCPU_ARM7>(0,val); return;
-			case REG_IF+2: REG_IF_WriteWord<ARMCPU_ARM7>(2,val); return;
+			case REG_IF: REG_IF_WriteWord<ARMCPU_ARM7, 0>(val); return;
+			case REG_IF+2: REG_IF_WriteWord<ARMCPU_ARM7, 2>(val); return;
 				
             case REG_IPCSYNC:
 				MMU_IPCSync(ARMCPU_ARM7, val);
@@ -6185,3 +6248,4 @@ const armcpu_memory_iface arm9_direct_memory_iface = {
 //print_memory_profiling( void) {
 //}
 //#endif /* End of PROFILE_MEMORY_ACCESS area */
+

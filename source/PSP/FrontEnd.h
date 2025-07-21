@@ -12,7 +12,8 @@ public:
 	bool cur;
 	bool Render3D;
 	bool FastMERendering;
-	bool cached_interpreter;
+	bool sort_3d;
+	bool _3d_always_on_top;
 
 	bool gpuLayerEnabled[2][5];
 

@@ -80,10 +80,13 @@ enum op{
     
     // Special custom opcodes
     OP_NOP = 0,
-    OP_MEMCPY,
+    OP_BC,
+    OP_BLC,
     OP_BXC,
-    OP_MRC_MCR,
-    OP_FAST_MUL,
+    OP_BXRC,
+    OP_DMA,
+    OP_3D_FIFO,
+    OP_3D_CMD,
 
 
 
@@ -170,7 +173,8 @@ enum extraFlags {
     EXTFL_SKIPLOADFLAG = 8,
     EXTFL_SKIPSAVEFLAG = 16,
     EXTFL_DIRECTMEMACCESS = 32,
-    EXTFL_NOFLAGS = 64
+    EXTFL_3DCOM = 64,
+    EXTFL_NOFLAGS = 128
 };
 
 
@@ -215,60 +219,59 @@ class block{
             printf("block created\n");
         }
 
-        bool IsIdleLoop(bool thumb)
-        {
+        bool isIdleLoop(bool thumb) {
             // see https://github.com/dolphin-emu/dolphin/blob/master/Source/Core/Core/PowerPC/PPCAnalyst.cpp#L678
             // it basically checks if one iteration of a loop depends on another
             // the rules are quite simple
 
-            if (WriteOP || MCROP)
+            // If there are any write operations or memory copies, the block isn’t idle.
+            if (WriteOP || (!thumb && MCROP))
                 return false;
-
-            uint16_t regsWrittenTo = 0;          // Bitfield for registers written to
-            uint16_t regsDisallowedToWrite = 0; // Bitfield for registers disallowed for writing
-
-            for (const auto& opcode : opcodes)
-            {
-
-                if (opcode._op == OP_ITP)
+        
+            // Use a 32-bit bitfield to track registers.
+            uint32_t regsWrittenTo = 0;          // Registers that have been written.
+            uint32_t regsDisallowedToWrite = 0;  // Registers that have been used as a source before being written.
+        
+            // Helper lambda to process a source register.
+            auto processSource = [&](int reg) {
+                // Skip invalid register (assumed to be -1) or out-of-range registers.
+                if (reg < 0 || reg >= 32)
+                    return;
+                uint32_t mask = 1u << reg;
+                // Only mark as disallowed if this register hasn't been written yet.
+                if (!(regsWrittenTo & mask))
+                    regsDisallowedToWrite |= mask;
+            };
+        
+            // Process each opcode in the basic block.
+            for (const auto& op : opcodes) {
+                // If an OP_ITP opcode is encountered, consider the block non-idle.
+                if (op._op == OP_ITP)
                     return false;
-
-                // Handle source registers rs1 and rs2
-                for (int reg : {opcode.rs1, opcode.rs2})
-                {
-                    if (reg == -1)
-                        continue;
-
-                    uint16_t regMask = 1 << reg; // Create a mask for the current register
-
-                    if (regsWrittenTo & regMask)
-                        continue;
-
-                    regsDisallowedToWrite |= regMask; // Mark this register as disallowed to write
-                }
-
-                // Handle destination register rd
-                int reg = opcode.rd;
-                if (reg != -1)
-                {
-                    uint16_t regMask = 1 << reg; // Create a mask for the current register
-
-                    if (regsDisallowedToWrite & regMask)
-                        return false; // Writing to a disallowed register
-
-                    regsWrittenTo |= regMask; // Mark this register as written to
+        
+                // Process both source registers (rs1 and rs2).
+                processSource(op.rs1);
+                processSource(op.rs2);
+        
+                // Process destination register (rd).
+                if (op.rd >= 0 && op.rd < 32) {
+                    uint32_t mask = 1u << op.rd;
+                    // If the register being written to has been used as a source (and not yet overwritten),
+                    // then the block isn't idle.
+                    if (regsDisallowedToWrite & mask)
+                        return false;
+                    // Otherwise, mark this register as written.
+                    regsWrittenTo |= mask;
                 }
             }
-
             return true;
         }
+        
 
 
         void addOP(op _op, uint32_t pc, uint32 rd = -1, uint32 rs1 = -1, uint32 rs2 = -1, uint32_t imm = -1, opType preOpType = PRE_OP_NONE, uint32_t condition = -1, uint32_t extra_flags = EXTFL_SAVECOND){
             
             if ((_op >= OP_CMP && _op != OP_SWI) || condition != -1) uses_flags = true;
-
-            if (_op == OP_BXC) JumpOP = true;
 
             opcodes.push_back(opcode(_op, rd, rs1, rs2, imm, preOpType, pc, condition, extra_flags));
 

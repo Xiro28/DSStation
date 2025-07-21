@@ -249,15 +249,13 @@ void MatrixCopy (float* matrixDST, const float* matrixSRC)
 {
 	__asm__ volatile (
 		"lv.q C000,  0 + %1\n"
-		"sv.q C000,  0 + %0\n"
-
 		"lv.q C010, 16 + %1\n"
-		"sv.q C010, 16 + %0\n"
-
 		"lv.q C020, 32 + %1\n"
-		"sv.q C020, 32 + %0\n"
-
 		"lv.q C030, 48 + %1\n"
+		
+		"sv.q C000,  0 + %0\n"
+		"sv.q C010, 16 + %0\n"
+		"sv.q C020, 32 + %0\n"
 		"sv.q C030, 48 + %0\n"
 		: "+m"(*matrixDST) : "m"(*matrixSRC));
 

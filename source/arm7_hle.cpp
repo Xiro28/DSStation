@@ -5,6 +5,7 @@
 #include "FIFO.h"
 #include "arm7_hle.h"
 #include "NDSSystem.h"
+#include "wifi_hle.h"
 
 u16 IPCSync9, IPCSync7;
 u16 IPCFIFOCnt9, IPCFIFOCnt7;
@@ -42,17 +43,24 @@ void SendIPCReply(u32 service, u32 data, u32 flag)
     u32 val = (service & 0x1F) | (data << 6) | ((flag & 0x1) << 5);
 
     if (IPCFIFO7.IsFull()){
-        printf("!!!! IPC FIFO FULL\n");
+        //printf("!!!! IPC FIFO FULL\n");
         IPCFIFOCnt7 |= 0x4000;
+        IPCFIFOCnt7 |= IPCFIFOCNT_SENDFULL;
+        IPCFIFOCnt9 |= IPCFIFOCNT_RECVFULL;
     }else
     {
         bool wasempty = IPCFIFO7.IsEmpty();
         IPCFIFO7.Write(val);
-        if (wasempty)
-            NDS_makeIrq(0, IRQ_BIT_IPCFIFO_RECVNONEMPTY);
+
+        if (wasempty){
+            IPCFIFOCnt7 &= ~IPCFIFOCNT_SENDEMPTY;
+            IPCFIFOCnt9 &= ~IPCFIFOCNT_RECVEMPTY;
+
+            if (IPCFIFOCnt9 & IPCFIFOCNT_RECVIRQEN)
+                NDS_makeIrq(0, IRQ_BIT_IPCFIFO_RECVNONEMPTY);
+        }
     }
 }
-
 
 void HLE_Reset(){
     IPCSync9 = 0;
@@ -75,6 +83,9 @@ void HLE_Reset(){
     memset(TS_SamplePos, 0, sizeof(TS_SamplePos));
 
     memset(FW_Data, 0, sizeof(FW_Data));
+
+    Sound_Nitro::Reset();
+    WiFIReset();
 }
 
 void OnIPCRequest_CartSave(u32 data)
@@ -115,15 +126,19 @@ void OnIPCRequest_CartSave(u32 data)
 
             u32 memlen = MMU_new.backupDevice.info.mem_size-1;
 
-            //printf("SAVEMEM: read %08X %08X %08X %08X\n", offset, dst, len, memlen);
-            if (memlen)
-                for (u32 i = 0; i < len; i++)
-                {
-                    u8 val= MMU_new.backupDevice.readByte((offset + i) & memlen, 0);
-                    _MMU_write08<ARMCPU_ARM7>(dst + i, val);
-                }
+            
 
-            SendIPCReply(0xB, 0x1, 1);
+            printf("SAVEMEM: read %08X %08X %08X %08X\n", offset, dst, len, memlen);
+            
+            if (memlen > 0)
+                for (u32 i = 0; i < len; i++)
+                    {
+                        u8 val= MMU_new.backupDevice.readByte((offset + i) & memlen, 0);
+                        _MMU_write08<ARMCPU_ARM7>(dst + i, val);
+                    }
+
+                    SendIPCReply(0xB, 0x1, 1);
+            
             SM_DataPos = 0;  
             return;
         }
@@ -466,7 +481,7 @@ void OnIPCRequest_RTC(u32 data)
         break;
 
     case 0x12: // read time
-        RTC_Read(0x6, 0x027FFDE8+4, 3);
+        RTC_Read(0x6, 0x027FFDE8, 3);
         SendIPCReply(0x5, 0x9200);
         break;
 
@@ -601,7 +616,7 @@ void OnIPCRequest_Mic(u32 data)
 
     Mic_Data[(data >> 16) & 0xF] = data & 0xFFFF;
 
-    if (!(data & (1<<24))) return;
+    if ((data & (1<<24)) == 0) return;
 
     u32 cmd = (Mic_Data[0] >> 8) - 0x40;
     switch (cmd)
@@ -615,7 +630,8 @@ void OnIPCRequest_Mic(u32 data)
         break;
 
     default:
-        printf("unknown mic request %08X\n", data);
+        //printf("unknown mic request %08X\n", data);
+        SendIPCReply(0x9, 0x0300C000);
         break;
     }
 }
@@ -624,11 +640,11 @@ void OnIPCRequest()
 {
     u32 val = IPCFIFO9.Read();
 
-    if (IPCFIFO9.IsEmpty() && (IPCFIFOCnt9 & 0x0004))
+    if (IPCFIFO9.IsEmpty() && (IPCFIFOCnt9 & IPCFIFOCNT_SENDIRQEN))
         NDS_makeIrq(ARM9, IRQ_BIT_IPCFIFO_SENDEMPTY);
 
     
-    //printf("%d %d\n", IPCFIFO9.Level(), IPCFIFO7.Level());
+    //printf("%x %x\n", val, IPCFIFO7.Peek());
 
     u32 service = val & 0x1F;
     u32 data = val >> 6;
@@ -670,7 +686,8 @@ void OnIPCRequest()
     case 0xA: // wifi
         if (flag) break;
         printf("HLE: wifi request %08X\n", data);
-       // Wifi::OnIPCRequest(data);
+        WifiOnIPCRequest(data);
+        //Wifi::OnIPCRequest(data);
         break;
 
     case 0xB: // cart savemem
@@ -738,7 +755,9 @@ void executeARM7Stuff(){
    //printf("ARM7: %08X\n", val);
 
    int fram_counter = _MMU_read32<ARMCPU_ARM7>(0x27FFC3C);
-    _MMU_write32<ARMCPU_ARM7>(0x27FFC3C, fram_counter+1);
+    _MMU_write32<ARM7>(0x27FFC3C, fram_counter+1);
+    //_MMU_write32<ARM7>(0x02067340, fram_counter+1);
+    //_MMU_write32<ARM9>(0x02067340, fram_counter+1);
 
    //Sound_Nitro::Process(1);
 }
@@ -757,6 +776,6 @@ void HLE_IPCSYNC(){
         SendIPCSync(0);
 
         // presumably ARM7-side ready flags for each IPC service
-        _MMU_write32<ARMCPU_ARM7>(0x027FFF8C, 0x0000FFF0);
+        _MMU_write32<ARMCPU_ARM7>(0x027FFF8C, 0x3FFF0);
     }
 }

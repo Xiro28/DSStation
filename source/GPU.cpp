@@ -603,11 +603,7 @@ FORCEINLINE FASTCALL void GPU::_master_setFinal3dColor(int dstX, int srcX)
 	u8 alpha = color[3];
 	u8* dst = currDst;
 
-	if (red == 0xfa && green == 0xfa && blue == 0xfa) {
-		return; //transparent, I hope none of the games use this color
-	}
-
-	u32 final = RGB15(0,0,0,1);
+	u32 final = RGB15(0,0,0,0);
 	
 	HostWriteWord(dst, passing, final);
 	bgPixels[x] = 0;
@@ -1853,16 +1849,17 @@ int Screen_Init()
 
 	disp_fifo.head = disp_fifo.tail = 0;
 
-	GPU_Screen = (volatile u8*)memalign(16, sizeof(u32) * 192 * 256);
-  	//GPU_Screen = (volatile u8*)(CACHED_KERNEL_MASK| (u32)GPU_Screen);
-
-	displ_pointer = GPU_Screen;
-
 	extern bool isEmu;
 	if (!isEmu)
 	{
+		
 		ME_GPU_Screen = vrp((CACHED_KERNEL_MASK | ME_EDRAM_BASE));
+		//ME_GPU_Screen = vrp((GE_EDRAM_BASE | UNCACHED_USER_MASK | 0x100000));
 		displ_pointer = ME_GPU_Screen;
+	}
+	else{
+		GPU_Screen = (volatile u8*)memalign(16, sizeof(u32) * 192 * 256);
+		displ_pointer = GPU_Screen;
 	}
 
 	/*volatile u8 * buff = displ_pointer;
@@ -1956,6 +1953,8 @@ void GPU_set_DISPCAPCNT(u32 val)
 			gpu->dispCapCnt.capSrc, gpu->dispCapCnt.dst - MMU.ARM9_LCD, gpu->dispCapCnt.src - MMU.ARM9_LCD,
 			gpu->dispCapCnt.srcA, gpu->dispCapCnt.srcB);*/
 }
+
+bool bg0_3D_drawn = false;
 
 static void GPU_RenderLine_layer(volatile NDS_Screen * screen, u16 l)
 {
@@ -2079,32 +2078,17 @@ PLAIN_CLEAR:
 					gpu->currBgNum = (u8)layerID;
 					gpu->blend1 = (gpu->BLDCNT & (1 << gpu->currBgNum))!=0;
 
-					/*if(my_config.Render3D)*/
-						//struct _BGxCNT *bgCnt = &(gpu->dispx_st)->dispx_BGxCNT[i16].bits;
-						//gpu->curr_mosaic_enabled = bgCnt->Mosaic_Enable;
-
 						if (gpu->core == GPU_MAIN)
 						{
+							//printf("BG%d 3D %d\n", layerID, dispCnt->BG0_3D);
+							//bg0_3D_drawn = dispCnt->BG0_3D  && gpu->LayersEnable[GPULayerID_BG1] && gpu->LayersEnable[GPULayerID_BG2] && !gpu->LayersEnable[GPULayerID_BG3];
 							if (layerID == GPULayerID_BG0 && dispCnt->BG0_3D)
 							{
 								gpu->currBgNum = GPULayerID_BG0;
-								
-								//comment this if using GU 3D
-								/*gfx3d_GetLineData(l, &gpu->_3dColorLine);
-								u8* colorLine = gpu->_3dColorLine;
-
-								for(int k = 256; --k;)
-									if(colorLine[psp_addrScreen3DLine[k]])
-										gpu->setFinalColor3d(k, k);*/
-							
 								continue;
 							}
 						}
 					
-
-					//useful for debugging individual layers
-					//if(gpu->core == 1 || i16 != 2) continue;
-
 					gpu->modeRender<false>(layerID);
 				} //layer enabled
 			}
@@ -2214,6 +2198,7 @@ template<bool SKIP> static void GPU_RenderLine_DispCapture(u16 l)
 							case 0:			// Capture screen (BG + OBJ + 3D)
 								{
 									//INFO("Capture screen (BG + OBJ + 3D)\n");
+									printf("1 Capture screen (BG + OBJ + 3D)\n");
 									u8 *src = (u8*)(gpu->tempScanline);
 									CAPCOPY(src,cap_dst,true);
 								}
@@ -2221,11 +2206,11 @@ template<bool SKIP> static void GPU_RenderLine_DispCapture(u16 l)
 							case 1:			// Capture 3D
 								{
 									//INFO("Capture 3D\n");
-									if(my_config.Render3D){
+
 										u16* colorLine;
+										printf("2 Capture screen (BG + OBJ + 3D)\n");
 										gfx3d_GetLineData15bpp(l, &colorLine);
 										CAPCOPY(((u8*)colorLine),cap_dst,false);
-									}
 
 								}
 							break;
@@ -2263,8 +2248,8 @@ template<bool SKIP> static void GPU_RenderLine_DispCapture(u16 l)
 						}
 						else
 						{
-							if(my_config.Render3D)
-								gfx3d_GetLineData15bpp(l, &srcA);
+							printf("3 Capture screen (BG + OBJ + 3D)\n");
+							gfx3d_GetLineData15bpp(l, &srcA);
 						}
 
 						static u16 fifoLine[256];

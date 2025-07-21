@@ -330,6 +330,8 @@ TEMPLATE static u32 copy()
      u32 dst = cpu->R[1];
      u32 cnt = cpu->R[2];
 
+     //printf("swi copy from %08X to %08X, cnt=%08X\n", src, dst, cnt);
+
 	 //INFO("swi copy from %08X to %08X, cnt=%08X\n", src, dst, cnt);
 
      switch(BIT26(cnt))
@@ -401,6 +403,8 @@ TEMPLATE static u32 fastCopy()
      u32 src = cpu->R[0] & 0xFFFFFFFC;
      u32 dst = cpu->R[1] & 0xFFFFFFFC;
      u32 cnt = cpu->R[2];
+
+    // printf("swi fastcopy from %08X to %08X, cnt=%08X\n", src, dst, cnt);
 
 	 //INFO("swi fastcopy from %08X to %08X, cnt=%08X\n", src, dst, cnt);
 
