@@ -66,10 +66,8 @@ void IPC_FIFOsend(u8 proc, u32 val)
 				IPCFIFOCNT_src |= IPCFIFOCNT_SENDFULL;
 			}
 
-
-
-			//if ((IPCFIFOCNT_dst & 0x0400) && wasempty)
-			//	NDS_makeIrq(proc^1, IRQ_BIT_IPCFIFO_RECVNONEMPTY);
+			if (IPCFIFOCNT_dst & 0x0400)
+				NDS_makeIrq(proc^1, IRQ_BIT_IPCFIFO_RECVNONEMPTY);
 
 			OnIPCRequest();
 		}

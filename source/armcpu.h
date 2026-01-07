@@ -84,6 +84,16 @@ inline bool CarryFrom(s32 left, s32 right)
   u32 res  = (0xFFFFFFFFU - (u32)left);
 
   return ((u32)right > res);
+	/*int res = 0;
+	
+	asm (
+		"not     $1, $4\n"
+		"sltu    %0, $1, $5\n"
+		: "=r"(res)
+		:
+		: "$1", "$2"
+	);
+  return res;*/
 }
 
 inline bool BorrowFrom(s32 left, s32 right)
@@ -93,14 +103,30 @@ inline bool BorrowFrom(s32 left, s32 right)
 
 inline bool OverflowFromADD(s32 alu_out, s32 left, s32 right)
 {
+	/*
     return ((left >= 0 && right >= 0) || (left < 0 && right < 0))
-			&& ((left < 0 && alu_out >= 0) || (left >= 0 && alu_out < 0));
+			&& ((left < 0 && alu_out >= 0) || (left >= 0 && alu_out < 0));*/
+
+	/*const bool b1 = ((left >= 0 && right >= 0) || (left < 0 && right < 0));
+	const bool b2 = ((left < 0 && alu_out >= 0) || (left >= 0 && alu_out < 0));
+	return b1 & b2;*/
+	const bool b1 = (left ^ alu_out) >> 31;
+	const bool b2 = !(left ^ right);
+	return b1 & b2;
 }
 
 inline bool OverflowFromSUB(s32 alu_out, s32 left, s32 right)
 {
-    return ((left < 0 && right >= 0) || (left >= 0 && right < 0))
-			&& ((left < 0 && alu_out >= 0) || (left >= 0 && alu_out < 0));
+    /*return ((left < 0 && right >= 0) || (left >= 0 && right < 0))
+			&& ((left < 0 && alu_out >= 0) || (left >= 0 && alu_out < 0));*/
+
+	/*const bool b1 = ((left < 0 && right >= 0) || (left >= 0 && right < 0));
+	const bool b2 = ((left < 0 && alu_out >= 0) || (left >= 0 && alu_out < 0));
+	return b1 & b2;*/
+	const int b1 = left ^ alu_out;
+	const int b2 = left ^ right;
+	const int b3 = b1 & b2;
+	return b3>>31;
 }
 
 //zero 15-feb-2009 - these werent getting used and they were getting in my way
@@ -355,10 +381,7 @@ extern const armcpu_ctrl_iface arm_default_ctrl_iface;
 int ARM7_ME(int data);
 
 template<int PROCNUM> u32 armcpu_exec();
-template<int PROCNUM> u32 FastArmcpu_exec(u32 opcode);
 
-template<int PROCNUM> u32 armcpu_execAFast();
-template<int PROCNUM> u32 armcpu_execTFast();
 
 #ifdef HAVE_JIT
 template<int PROCNUM, bool jit> u32 armcpu_exec();

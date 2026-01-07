@@ -284,7 +284,7 @@ void OnIPCRequest_Touchscreen(u32 data)
         {
             if (TS_Status != 2)
             {
-                SendIPCReply(0x6, 0x03008103);
+                SendIPCReply(0x6, 0x03008203);
                 break;
             }
 
@@ -756,6 +756,21 @@ void executeARM7Stuff(){
 
    int fram_counter = _MMU_read32<ARMCPU_ARM7>(0x27FFC3C);
     _MMU_write32<ARM7>(0x27FFC3C, fram_counter+1);
+    
+    if (nds.is_twl_sdk()){
+        bool sync = _MMU_read08<ARMCPU_ARM7>(0x2FFFFF0) & 0x1;
+        _MMU_write08<ARM7>(0x2FFFFF1, !sync);
+        _MMU_write08<ARM7>(0x2FFFFF2, 1);
+        _MMU_write08<ARM7>(0x2FFFFF3, 1);
+    }
+
+   /* _MMU_write16<ARM7>(0x02FFFC20, 0);
+    _MMU_write16<ARM7>(0x02FFFC22, 0);
+    _MMU_write16<ARM7>(0x02FFFC24, 2);
+    _MMU_write16<ARM7>(0x02FFFC26, 8);
+    _MMU_write16<ARM7>(0x02FFFC28, 4);
+    _MMU_write16<ARM7>(0x04000006, 0);*/
+
     //_MMU_write32<ARM7>(0x02067340, fram_counter+1);
     //_MMU_write32<ARM9>(0x02067340, fram_counter+1);
 

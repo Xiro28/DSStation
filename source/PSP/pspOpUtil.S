@@ -28,18 +28,18 @@ set_sub_flags:
     INS  $28, $t0, 5, 1   # 
 
     # Z 
-    SLTIU $8, $v0, 1
-    INS  $28, $8, 6, 1 
+    SLTIU $t0, $v0, 1
+    INS  $28, $t0, 6, 1 
 
     # N
-    SRL  $v1, $v0, 31
-    INS  $28, $v1, 7, 1   
+    SRL  $t1, $v0, 31
+    INS  $28, $t1, 7, 1   
 
     # V           
-    SLTU $8, $4, $5
-    XOR $8, $8, $v1 
+    SLT $t0, $4, $5
+    XOR  $t0, $t0, $t1
     JR   $31           
-    INS  $28, $8, 4, 1   
+    INS  $28, $t0, 4, 1   
 
 
 .global  set_and_flags 		

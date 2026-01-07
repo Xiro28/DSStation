@@ -35,6 +35,17 @@ namespace Sound_Nitro
 
 struct Track;
 
+struct SNDDriverInfo
+{
+    //struct SNDWork work; // 0x0000
+    uint8_t unk_XX[0x1180]; // size = 0x1180
+    u32 channelControls[16]; // 0x1180
+    //struct SNDWork *workPtr; // 0x11C0
+    uint32_t* workPtr; // 0x11C0
+    u32 lockedChannels; // 0x11C4
+    u8 unk_XXX[24]; // 0x11C8
+}; // size = 0x11E0
+
 struct SNDSharedWork
 {
     u32 finishedCommandTag; // 0x0
@@ -430,8 +441,6 @@ void Reset()
 
     SPU_WriteWord(0x04000500, 0x807F);
 
-    SNDi_InitSharedWork((SNDSharedWork*)SharedMem);
-
     Version = 0;
     offset_cmd = 999;
 
@@ -488,6 +497,37 @@ void Reset()
     }
 
     NDS::ScheduleEvent(NDS::Event_HLE_SoundCmd, true, 174592, Process, 1);*/
+}
+
+
+/*         
+    static void ReadDriverInfo(struct SNDDriverInfo *driverInfo)
+    {
+        MI_CpuCopy32(&SNDi_Work, driverInfo, sizeof(SNDi_Work));
+
+        driverInfo->workPtr = &SNDi_Work;
+
+        for (int i = 0; i < SND_CHANNEL_COUNT; i++)
+        {
+            driverInfo->channelControls[i] = SND_GetChannelControl(i);
+        }
+
+        driverInfo->lockedChannels = SND_GetLockedChannel(0);
+    }
+
+*/
+
+void readDriverInfo(SNDDriverInfo* driverInfoAddr)
+{
+    // Implement full memcpy
+
+    for (int i = 0; i < 16; i++)
+    {
+        u32 val = SPU_ReadWord((0x4000400 + ((int)i) * 0x10));
+        _MMU_ARM7_write32((u32)&driverInfoAddr->channelControls[i], val);
+    }
+
+    _MMU_ARM7_write32((u32)&driverInfoAddr->lockedChannels, sLockedChannelMask);
 }
 
 void OnAlarm(u32 num)
@@ -1563,6 +1603,7 @@ void ProcessCommands()
 
             case 0x1D:
                 SharedMem = args[0];
+                SNDi_InitSharedWork((SNDSharedWork*)SharedMem);
                 //SharedMemPtr = (SNDSharedWork*)&MMU.MAIN_MEM[SharedMem];
                 break;
 
@@ -1625,6 +1666,12 @@ void ProcessCommands()
                         StopChannel(i, false);
                     }
                 }
+            }
+            break;
+
+            case 0x21: // Read driver info
+            {
+                readDriverInfo((SNDDriverInfo*)args[0]);
             }
             break;
 

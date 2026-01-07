@@ -247,8 +247,17 @@ public:
 //while the fifo was full, apparently expecting the fifo not to be full by that time.
 //in general we are finding that 3d takes less time than we think....
 //although maybe the true culprit was charging the cpu less time for the dma.
-#define GFX_DELAY(x) NDS_RescheduleGXFIFO(1, false);
-#define GFX_DELAY_M2(x) NDS_RescheduleGXFIFO(1, false); 
+//#define GFX_DELAY(x) NDS_RescheduleGXFIFO(1, false);
+//#define GFX_DELAY_M2(x) NDS_RescheduleGXFIFO(1, false); 
+
+//XIRO - I think it's useless to infer multiple times this function since it induces an increduible overhead
+// Calling just once is more then enough to update the state of the emulator
+// The thing is that it might be some cycles off compared to the real implementation since some functions issues the reschedule 4 times while others just 1
+// A partial good solution is to update the cycles by 2, which I find to be a good compromise
+
+// Disable those
+#define GFX_DELAY(x) {}
+#define GFX_DELAY_M2(x) {}
 
 #define V_GFX_DELAY(x) NDS_RescheduleGXFIFO(x, false);
 
@@ -1391,11 +1400,12 @@ static void gfx3d_glNormal(u32 v)
 		colorRGB[c] = std::min(31,vertexColor[c]);
 	}
 
-	GFX_DELAY(9);
-	GFX_DELAY_M2(/*(lightMask) & 0x01*/);
-	GFX_DELAY_M2(/*(lightMask>>1) & 0x01*/);
-	GFX_DELAY_M2(/*(lightMask>>2) & 0x01*/);
-	GFX_DELAY_M2(/*(lightMask>>3) & 0x01*/);
+	V_GFX_DELAY(4);
+	/*GFX_DELAY(9);
+	GFX_DELAY_M2();
+	GFX_DELAY_M2();
+	GFX_DELAY_M2();
+	GFX_DELAY_M2();*/
 }
 
 
@@ -1439,8 +1449,11 @@ static void gfx3d_glTexCoord(u32 val)
 	}
 	else
 	{
-		_s /= 16.0f;
-		_t /= 16.0f;
+		/*_s /= 16.0f;
+		_t /= 16.0f;*/
+
+		_s = (int)(_s) >> 4;
+		_t = (int)(_t) >> 4;
 
 		last_s = _s;
 		last_t = _t;
@@ -1655,17 +1668,7 @@ static BOOL gfx3d_glBoxTest(u32 v)
 	MMU_new.gxstat.tb = 0;		// clear busy
 	GFX_DELAY(103);
 
-#if 0
-	INFO("BoxTEST: x %f y %f width %f height %f depth %f\n", 
-				BTcoords[0], BTcoords[1], BTcoords[2], BTcoords[3], BTcoords[4], BTcoords[5]);
-	/*for (int i = 0; i < 16; i++)
-	{
-		INFO("mtx1[%i] = %f ", i, mtxCurrent[1][i]);
-		if ((i+1) % 4 == 0) INFO("\n");
-	}
-	INFO("\n");*/
-#endif
-
+/*
 	//(crafted to be clear, not fast.)
 
 	//nanostray title, ff4, ice age 3 depend on this and work
@@ -1770,11 +1773,11 @@ static BOOL gfx3d_glBoxTest(u32 v)
 	if(MMU_new.gxstat.tr == 0)
 	{
 		//printf("%06d FAIL %d\n",boxcounter,gxFIFO.size);
-	}
+	}*/
 	
 	//Xiro 22/09/2020
 	//Yeah I know this is cheating, but now we need speed and maybe this could help a bit..
-	//MMU_new.gxstat.tr = 1;
+	MMU_new.gxstat.tr = 1;
 	
 	return TRUE;
 }
@@ -2370,7 +2373,7 @@ void gfx3d_execute3D()
 
 	//sceGuFinish();
 	
-	if (cost) V_GFX_DELAY(cost); 
+	if (cost) V_GFX_DELAY(cost * 4); // Hack to not call the reschedule function too often 
 }
 
 void gfx3d_glFlush(u32 v)

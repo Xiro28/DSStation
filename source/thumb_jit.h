@@ -7,7 +7,7 @@ void emitThumbOP(opcode& op){
 
            flag_dirty = false;
 
-            emit_jal(thumb_instructions_set[op.rs1 >> 6]);
+            emit_jal(thumb_instructions_set[ARM9][op.rs1 >> 6]);
 
             emit_movi(psp_a0,op.rs1&0xFFFF); 
 
@@ -99,8 +99,8 @@ void emitThumbOP(opcode& op){
 
             if (!(op.extra_flags & EXTFL_NOFLAGS)){
                 if (op.saveN){
-                    emit_srl(psp_t0, dst, 31);
-                    emit_ins(psp_gp, psp_t0, _flag_N8, _flag_N8);
+                    emit_srl(psp_t1, dst, 31);
+                    emit_ins(psp_gp, psp_t1, _flag_N8, _flag_N8);
                 }
 
                 if (op.saveZ){
@@ -115,10 +115,11 @@ void emitThumbOP(opcode& op){
                 }
 
                 if (op.saveV){
-                    emit_srl(psp_t1, dst, 31);
-                    emit_sltu(psp_t0, rs1, rs2);
-                    emit_xor(psp_t0, psp_t0, psp_t1);
-                    emit_ins(psp_gp, psp_t0, _flag_V8, _flag_V8);
+                    if (!op.saveN) emit_srl(psp_t1, psp_v0, 31);
+
+                    emit_slt(psp_t2, rs1, rs2);
+                    emit_xor(psp_t2, psp_t2, psp_t1);
+                    emit_ins(psp_gp, psp_t2, _flag_V8, _flag_V8);
                 }
             }
 
@@ -247,23 +248,56 @@ void emitThumbOP(opcode& op){
             emit_jal(cpu->swi_tab[op.rs1]);
             emit_Write32(optmizeDelaySlot);
         }
+        break;
 
         case OP_CMP:
         {
-            /*psp_gpr_t rs1 = reg_alloc.getReg(op.rs1, psp_a0);
-            psp_gpr_t rs2 = reg_alloc.getReg(op.rs2, psp_a1);
+            int32_t regs[2] = {op.rs1, op.rs2};
 
-            if (op.preOpType == PRE_OP_IMM)
-                emit_li(psp_a1, op.imm);
-            else if (rs2 != psp_a1) emit_move(psp_a1, rs2);
-            
-            if (rs1 != psp_a0) emit_move(psp_a0, rs1);
+            regman.get(2, regs);
+            const psp_gpr_t rs1 = (psp_gpr_t)regs[0]; 
+            psp_gpr_t rs2 = (psp_gpr_t)regs[1];
+
+            if (op.preOpType == PRE_OP_IMM){
+                rs2 = psp_a1;
+                emit_li(rs2, op.imm);
+            }
+            emit_subu(psp_v0, rs1, rs2);
+
+           /* emit_move(psp_a0, rs1);
+            emit_move(psp_a1, rs2);
             
 
             emit_jal(set_sub_flags); 
-            emit_subu(psp_v0, psp_a0, psp_a1);  
+            emit_subu(psp_v0, psp_a0, psp_a1);  */
 
-            flag_dirty = true;   */   
+            if (op.saveN){
+                emit_srl(psp_t1, psp_v0, 31);
+                emit_ins(psp_gp, psp_t1, _flag_N8, _flag_N8);
+            }
+            
+            if (op.saveZ){
+                emit_sltiu(psp_t3, psp_v0, 1);
+                emit_ins(psp_gp, psp_t3, _flag_Z8, _flag_Z8);
+            }
+
+            if (op.saveC){
+                emit_sltu(psp_t0, rs1, rs2);
+                emit_xori(psp_t0, psp_t0, 1);
+                emit_ins(psp_gp, psp_t0, _flag_C8, _flag_C8);
+            }
+
+            // V
+            if (op.saveV){
+                if (!op.saveN) emit_srl(psp_t1, psp_v0, 31);
+
+                emit_slt(psp_t2, rs1, rs2);
+                emit_xor(psp_t2, psp_t2, psp_t1);
+                emit_ins(psp_gp, psp_t2, _flag_V8, _flag_V8);
+            }
+
+
+            flag_dirty = flag_dirty || (op.saveZ || op.saveN || op.saveC || op.saveV);      
         }
         break;
  
@@ -291,7 +325,7 @@ void emitThumbOP(opcode& op){
                 emit_ins(psp_gp, psp_t0, _flag_Z8, _flag_Z8);
             }
 
-            flag_dirty = true;          
+            flag_dirty = flag_dirty || (op.saveZ || op.saveN);          
         }
         break;
 
@@ -321,7 +355,7 @@ void emitThumbOP(opcode& op){
 
             regman.mark_dirty(dst);
 
-            flag_dirty = true;
+            flag_dirty = flag_dirty || (op.saveZ || op.saveN); 
         }
         break;
 
@@ -425,7 +459,7 @@ void emitThumbOP(opcode& op){
 
             regman.mark_dirty(dst);
 
-            flag_dirty = true;     
+            flag_dirty = flag_dirty || (op.saveZ || op.saveN);      
         }
         break;
 

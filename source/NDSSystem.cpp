@@ -90,6 +90,33 @@ TSCalInfo TSCal;
 unsigned int cache_hit = 0;
 unsigned int cache_miss = 0;
 
+#define REGISTER_BASIC_EVENT(ID, TYPE) \
+	registerEvent(ID, &TYPE, \
+		[](void* instance) { \
+			return static_cast<TSequenceItem*>(instance)->enabled; \
+		}, \
+		[](void* instance) { \
+			return static_cast<TSequenceItem*>(instance)->next(); \
+		});
+
+#define REGISTER_DMA_EVENT(P, C) \
+	registerEvent(static_cast<EventID>(DMA_00 + P * 4 + C), &dma_##P##_##C, \
+		[](void* instance) { \
+			return static_cast<TSequenceItem_DMA<P, C>*>(instance)->isEnabled(); \
+		}, \
+		[](void* instance) { \
+			return static_cast<TSequenceItem_DMA<P, C>*>(instance)->next(); \
+		});
+
+#define REGISTER_TIMER_EVENT(P, C) \
+	registerEvent(static_cast<EventID>(TIMER_00 + P * 4 + C), &timer_##P##_##C, \
+		[](void* instance) { \
+			return static_cast<TSequenceItem_Timer<P, C>*>(instance)->enabled; \
+		}, \
+		[](void* instance) { \
+			return static_cast<TSequenceItem_Timer<P, C>*>(instance)->next(); \
+		});	
+
 namespace DLDI
 {
 	bool tryPatch(void *data, size_t size, unsigned int device);
@@ -554,7 +581,7 @@ static void desmume_cycle()
 	// Process non-emulation (hardware) rendering and interrupts.
 	if (likely(!IsEmu()))
 	{
-		if (drawn || drawingInterruptPending)
+		if (drawn || (ShouldSkip2dFrame() && !drawingInterruptPending))
 		{
 			// If a new frame was drawn, decide whether to send an interrupt now
 			// or mark one as pending based on whether the 2D frame should be skipped.
@@ -563,6 +590,8 @@ static void desmume_cycle()
 			/*} else {
 				drawingInterruptPending = true;
 			}*/
+
+			const bool frame_drawn = drawingInterruptPending || drawn;
 
 			// Since the ME runs slower than the CPU, we need to draw the screen even if the frameskip is enabled.
 			// This is because the ME could wait up to 10 frames before drawing the screen again. So better to set it pending.
@@ -579,7 +608,8 @@ static void desmume_cycle()
 			}
 
 			// Render the screen (using 3D frame-skipping state)
-			EMU_SCREEN(ShouldSkip2dFrame(), ShouldSkip3dFrame());
+			if (frame_drawn)
+				EMU_SCREEN(ShouldSkip2dFrame(), ShouldSkip3dFrame());
 		}
 	}
 	else
@@ -1249,7 +1279,7 @@ struct TSequenceItem_GXFIFO : public TSequenceItem
 	FORCEINLINE void exec()
 	{
 		//		IF_DEVELOPER(DEBUG_statistics.sequencerExecutionCounters[4]++);
-		while (isTriggered())
+		//while (isTriggered())
 		{
 			enabled = false;
 			gfx3d_execute3D();
@@ -1559,236 +1589,198 @@ struct Sequencer
 	TSequenceItem_Timer<1, 2> timer_1_2;
 	TSequenceItem_Timer<1, 3> timer_1_3;
 
-    s32 next_time[EVENT_COUNT];
-    bool pending[EVENT_COUNT];
-    int next[EVENT_COUNT];  // linked list: next[index]
-    int prev[EVENT_COUNT];
-    int head;  // head of the sorted list
+	// Definiamo i tipi di puntatori a funzione per le callback
+    // Usiamo void* per passare l'istanza del componente (es. &timer0)
+    using CheckFunc = bool (*)(void* instance);
+    using NextFunc = u64 (*)(void* instance);
+
+    struct EventHandler {
+        void* instance;      // Puntatore all'oggetto (es. &divider)
+        CheckFunc isEnabled; // Puntatore alla funzione statica wrapper
+        NextFunc computeNext;
+    };
+
+    struct EventNode {
+        s32 next_time; // 4 byte
+        s32 next;      // 4 byte
+        s32 prev;      // 4 byte
+        s32 pending;   // 4 byte (usiamo s32 invece di bool per allineamento perfetto)
+    };
+
+    // Allocazione statica contigua
+    EventNode nodes[EVENT_COUNT];
+    EventHandler handlers[EVENT_COUNT];
+    s32 head;
+
+	void registerEvent(int id, void* instance, CheckFunc check, NextFunc next) {
+        handlers[id].instance = instance;
+        handlers[id].isEnabled = check;
+        handlers[id].computeNext = next;
+    }
 
     void removeFromList(int idx) {
-        int p = prev[idx];
-        int n = next[idx];
-        if (p != -1) next[p] = n;
-        if (n != -1) prev[n] = p;
-        if (head == idx) head = n;
-        prev[idx] = next[idx] = -1;
+        EventNode& n = nodes[idx]; // Riferimento per leggibilità
+        s32 p = n.prev;
+        s32 nxt = n.next; // 'next' è parola riservata a volte, usiamo nxt
+
+        if (p != -1) nodes[p].next = nxt;
+        if (nxt != -1) nodes[nxt].prev = p;
+        if (head == idx) head = nxt;
+
+        n.prev = -1;
+        n.next = -1;
+    }
+
+	template <EventID idx>
+	void removeFromList() {
+        removeFromList(static_cast<int>(idx));
     }
 
     void insertSorted(int idx) {
-        if (head == -1 || next_time[idx] < next_time[head]) {
-            // Insert at front
-            next[idx] = head;
-            prev[idx] = -1;
-            if (head != -1) prev[head] = idx;
+        s32 time = nodes[idx].next_time;
+
+        // Fast path: Inserimento in testa
+        if (head == -1 || time < nodes[head].next_time) {
+            nodes[idx].next = head;
+            nodes[idx].prev = -1;
+            if (head != -1) nodes[head].prev = idx;
             head = idx;
             return;
         }
 
-        int curr = head;
-        while (next[curr] != -1 && next_time[next[curr]] < next_time[idx]) {
-            curr = next[curr];
+        // Linear search (Cache friendly grazie al layout EventNode)
+        s32 curr = head;
+        while (true) {
+            s32 nxt = nodes[curr].next;
+            if (nxt == -1 || nodes[nxt].next_time > time) break;
+            curr = nxt;
         }
-        int nxt = next[curr];
-        next[curr] = idx;
-        prev[idx] = curr;
-        next[idx] = nxt;
-        if (nxt != -1) prev[nxt] = idx;
+
+        // Inserimento
+        s32 nxt = nodes[curr].next;
+        nodes[curr].next = idx;
+        nodes[idx].prev = curr;
+        nodes[idx].next = nxt;
+        if (nxt != -1) nodes[nxt].prev = idx;
     }
 
 	bool isEnabled(EventID id)
 	{
-		switch (id)
-		{
-		case DISP_CNT:
-			return true;
-		case HLE_AUDIO:
-			return true;
-
-		case DIVIDER:
-			return divider.isEnabled();
-		case SQRT_UNIT:
-			return sqrtunit.isEnabled();
-		case GX_FIFO:
-			return gxfifo.enabled;
-		case WIFI_HLE:
-			return wifi_hle.isEnabled();
-
-		case DMA_00:
-			return dma_0_0.isEnabled();
-		case DMA_01:
-			return dma_0_1.isEnabled();
-		case DMA_02:
-			return dma_0_2.isEnabled();
-		case DMA_03:
-			return dma_0_3.isEnabled();
-
-		case TIMER_00:
-			return timer_0_0.enabled;
-		case TIMER_01:
-			return timer_0_1.enabled;
-		case TIMER_02:
-			return timer_0_2.enabled;
-		case TIMER_03:
-			return timer_0_3.enabled;
-
-		default:
-			return false;
-		}
+		return handlers[id].isEnabled(handlers[id].instance);
 	}
 
 	template <EventID id>
 	s32 computeNext()
 	{
-		switch (id)
-		{
-		case DISP_CNT:
-			return dispcnt.next() - nds_timer;
-		case DIVIDER:
-			return divider.next() - nds_timer;
-		case SQRT_UNIT:
-			return sqrtunit.next() - nds_timer;
-		case GX_FIFO:
-			return gxfifo.next() - nds_timer;
-		case WIFI_HLE:
-			return wifi_hle.next() - nds_timer;
-		case HLE_AUDIO:
-			return hle_audio.next() - nds_timer;
-
-		case DMA_00:
-			return dma_0_0.next() - nds_timer;
-		case DMA_01:
-			return dma_0_1.next() - nds_timer;
-		case DMA_02:
-			return dma_0_2.next() - nds_timer;
-		case DMA_03:
-			return dma_0_3.next() - nds_timer;
-
-		case TIMER_00:
-			return timer_0_0.next() - nds_timer;
-		case TIMER_01:
-			return timer_0_1.next() - nds_timer;
-		case TIMER_02:
-			return timer_0_2.next() - nds_timer;
-		case TIMER_03:
-			return timer_0_3.next() - nds_timer;
-
-		default:
-			return kNever;
-		}
+		return handlers[id].computeNext(handlers[id].instance) - nds_timer;
 	}
 
 	s32 computeNext(EventID id)
 	{
-		switch (id)
-		{
-		case DISP_CNT:
-			return dispcnt.next() - nds_timer;
-		case DIVIDER:
-			return divider.next() - nds_timer;
-		case SQRT_UNIT:
-			return sqrtunit.next() - nds_timer;
-		case GX_FIFO:
-			return gxfifo.next() - nds_timer;
-		case WIFI_HLE:
-			return wifi_hle.next() - nds_timer;
-		case HLE_AUDIO:
-			return hle_audio.next() - nds_timer;
-
-		case DMA_00:
-			return dma_0_0.next() - nds_timer;
-		case DMA_01:
-			return dma_0_1.next() - nds_timer;
-		case DMA_02:
-			return dma_0_2.next() - nds_timer;
-		case DMA_03:
-			return dma_0_3.next() - nds_timer;
-
-		case TIMER_00:
-			return timer_0_0.next() - nds_timer;
-		case TIMER_01:
-			return timer_0_1.next() - nds_timer;
-		case TIMER_02:
-			return timer_0_2.next() - nds_timer;
-		case TIMER_03:
-			return timer_0_3.next() - nds_timer;
-
-		default:
-			return kNever;
-		}
+		return handlers[id].computeNext(handlers[id].instance) - nds_timer;
 	}
 
     void reSchedule() {
         head = -1;
         for (int i = 0; i < EVENT_COUNT; ++i) {
-            if (isEnabled(static_cast<EventID>(i))) {
-                next_time[i] = computeNext(static_cast<EventID>(i));
-                insertSorted(i);
+
+			EventID eventId = static_cast<EventID>(i);
+
+            nodes[i].prev = -1;
+            nodes[i].next = -1;
+
+            if (isEnabled(eventId)) {
+                nodes[i].next_time = computeNext(eventId);
+                insertSorted(eventId);
             } else {
-                next_time[i] = kNever;
-                next[i] = prev[i] = -1;
+                nodes[i].next_time = kNever;
             }
         }
     }
 
 	void resolve_pendings() {
         for (int i = 0; i < EVENT_COUNT; ++i) {
-            if (pending[i]) {
-				pending[i] = false;
-                insertSorted(i);
+			EventID eventId = static_cast<EventID>(i);
+            // Check veloce su intero (pending) prima di chiamare la funzione virtuale/pointer
+            if (nodes[i].pending) {
+                if (isEnabled(eventId)) {
+                    nodes[i].pending = 0;
+                    insertSorted(eventId);
+                }
             }
         }
     }
 
 
 	void updateEventCycle(EventID id, u32 cycles) {
-
         int idx = static_cast<int>(id);
-
-        next_time[idx] -= cycles;
-
-		if (next_time[idx] <= 0) 
-			removeFromList(idx);
-
+        nodes[id].next_time -= cycles;
     }
 
+	template <EventID id>
+	void addToEvent(u32 cycles) {
+		constexpr int idx = static_cast<int>(id);
+        nodes[idx].next_time += cycles;
+        nodes[idx].pending = true;
+	}
+
 	template <EventID id, bool direct>
-	void updateEvent() {
+    void updateEvent() {
+        // Verifica rapida se il nodo è già linkato
+        if (nodes[id].prev != -1 || nodes[id].next != -1 || head == id) {
+            removeFromList(id);
+        }
 
-        const int idx = static_cast<int>(id);
+        if (!isEnabled(id)) return;
 
-		if (prev[idx] != -1 || next[idx] != -1 || head == idx)
-			removeFromList(idx);
-		
-		if (!isEnabled(id))
-			return;
-		
-		s32 new_time = computeNext<id>();
-        next_time[idx] = new_time;
-        if (direct) insertSorted(idx);
-		else pending[idx] = true;
+        nodes[id].next_time = computeNext(id);
+
+        if (direct) {
+            insertSorted(id);
+        } else {
+            nodes[id].pending = 1;
+        }
     }
 
 
     s32 popNext(EventID &outEvent) {
-		int idx = head;
-        outEvent = static_cast<EventID>(idx);
+		s32 currentHead = head;
+        if (currentHead == -1) {
+            // Gestione lista vuota
+            return kNever; 
+        }
 
-		// IF two events fires at almost the same time, we want to execute BOTH (with an error of 5 cycles)
-		if ((next_time[idx] - next_time[prev[idx]]) <= 5) 
-		{
-			u32 cycles = next_time[prev[idx]];
-			// remove the first one
-			removeFromList(idx);
-			// and return the second one	
-			return cycles;
-		}
-        return next_time[idx];
+        return nodes[currentHead].next_time;
     }
 
 	Sequencer() : head(-1) {
         for (int i = 0; i < EVENT_COUNT; ++i) {
-            next[i] = prev[i] = -1;
+            nodes[i].next = -1;
+            nodes[i].prev = -1;
+            nodes[i].next_time = kNever;
+            nodes[i].pending = 0;
+            
+            // Default handlers sicuri (evitano crash se dimentichi di registrarli)
+            handlers[i].instance = nullptr;
+            handlers[i].isEnabled = [](void*) { return false; };
+            handlers[i].computeNext = [](void*) { return kNever; };
         }
+
+		REGISTER_DMA_EVENT(0, 0);
+		REGISTER_DMA_EVENT(0, 1);
+		REGISTER_DMA_EVENT(0, 2);
+		REGISTER_DMA_EVENT(0, 3);
+
+		REGISTER_TIMER_EVENT(0, 0);
+		REGISTER_TIMER_EVENT(0, 1);
+		REGISTER_TIMER_EVENT(0, 2);
+		REGISTER_TIMER_EVENT(0, 3);
+
+		REGISTER_BASIC_EVENT(DISP_CNT, dispcnt);
+		REGISTER_BASIC_EVENT(HLE_AUDIO, hle_audio);
+		REGISTER_BASIC_EVENT(DIVIDER, divider);
+		REGISTER_BASIC_EVENT(SQRT_UNIT, sqrtunit);
+		REGISTER_BASIC_EVENT(WIFI_HLE, wifi_hle);
 	}
 
 	void init();
@@ -1804,7 +1796,7 @@ struct Sequencer
 		dispcnt.save(os);
 		divider.save(os);
 		sqrtunit.save(os);
-		gxfifo.save(os);
+		//gxfifo.save(os);
 		wifi.save(os);
 #define SAVE(I, X, Y) I##_##X##_##Y.save(os);
 		SAVE(timer, 0, 0);
@@ -1840,8 +1832,8 @@ struct Sequencer
 			return false;
 		if (!sqrtunit.load(is))
 			return false;
-		if (!gxfifo.load(is))
-			return false;
+		/*if (!gxfifo.load(is))
+			return false;*/
 		if (version >= 1)
 			if (!wifi.load(is))
 				return false;
@@ -1912,9 +1904,9 @@ void NDS_RescheduleGXFIFO(u32 cost, bool update)
 	}
 	MMU.gfx3dCycles += cost;
 
-	sequencer.updateEvent<GX_FIFO, false>();
+	//sequencer.addToEvent<GX_FIFO>(cost);
 
-	NDS_ReschedulePtr = 1;
+	//NDS_ReschedulePtr = 1;
 }
 
 void NDS_RescheduleTimers()
@@ -1924,7 +1916,7 @@ void NDS_RescheduleTimers()
 	check(0, 1);
 	check(0, 2);
 	check(0, 3);
-	// check(1,0); check(1,1); check(1,2); check(1,3);
+	 //check(1,0); check(1,1); check(1,2); check(1,3);
 #undef check
 
 	if (sequencer.timer_0_0.enabled)
@@ -1935,6 +1927,15 @@ void NDS_RescheduleTimers()
 		sequencer.updateEvent<TIMER_02, false>();
 	if (sequencer.timer_0_3.enabled)
 		sequencer.updateEvent<TIMER_03, false>();
+
+	/*if (sequencer.timer_1_0.enabled)
+		sequencer.updateEvent<TIMER_10, false>();
+	if (sequencer.timer_1_1.enabled)
+		sequencer.updateEvent<TIMER_11, false>();
+	if (sequencer.timer_1_2.enabled)
+		sequencer.updateEvent<TIMER_12, false>();
+	if (sequencer.timer_1_3.enabled)
+		sequencer.updateEvent<TIMER_13, false>();*/
 
 	NDS_ReschedulePtr = 1;
 }
@@ -1950,6 +1951,15 @@ void NDS_RescheduleDMA()
 		sequencer.updateEvent<DMA_02, false>();
 	if (sequencer.dma_0_3.isEnabled())
 		sequencer.updateEvent<DMA_03, false>();
+
+	/*if (sequencer.dma_1_0.isEnabled())
+		sequencer.updateEvent<DMA_10, false>();
+	if (sequencer.dma_1_1.isEnabled())
+		sequencer.updateEvent<DMA_11, false>();
+	if (sequencer.dma_1_2.isEnabled())
+		sequencer.updateEvent<DMA_12, false>();
+	if (sequencer.dma_1_3.isEnabled())
+		sequencer.updateEvent<DMA_13, false>();*/
 
 	NDS_ReschedulePtr = 1;
 }
@@ -1987,7 +1997,7 @@ void Sequencer::init()
 	dispcnt.param = ESI_DISPCNT_HStart;
 	dispcnt.timestamp = 0;
 
-	gxfifo.enabled = false;
+	//gxfifo.enabled = false;
 
 	dma_0_0.controller = &MMU_new.dma[0][0];
 	dma_0_1.controller = &MMU_new.dma[0][1];
@@ -2207,7 +2217,7 @@ static void execHardware_hstart()
 
 		gfx3d_VBlankSignal();
 		// this isnt important for any known game, but it would be nice to prove it.
-		NDS_RescheduleGXFIFO(392 * 2, false);
+		//NDS_RescheduleGXFIFO(392 * 2, false);
 	}
 
 	// write the new vcount
@@ -2297,20 +2307,20 @@ void Sequencer::execHardware()
 
 	// if (readslot1.isTriggered()) readslot1.exec();
 
-	if (gxfifo.isTriggered())
+	/*if (gxfifo.isTriggered())
 	{
 		gxfifo.exec();
-		sequencer.removeFromList(GX_FIFO);
-	}
+		sequencer.removeFromList<GX_FIFO>();
+	}*/
 
 	if (sqrtunit.isTriggered()){
 		sqrtunit.exec();
-		sequencer.removeFromList(SQRT_UNIT);
+		sequencer.removeFromList<SQRT_UNIT>();
 	}
 
 	if (divider.isTriggered()){
 		divider.exec();
-		sequencer.removeFromList(DIVIDER);
+		sequencer.removeFromList<DIVIDER>();
 	}
 
 	if (alarmHLE.isTriggered())
@@ -2322,7 +2332,7 @@ void Sequencer::execHardware()
 	{
 		// if the wifi is enabled, then we need to check the next wifi event
 		wifi_hle.exec();
-		sequencer.removeFromList(WIFI_HLE);
+		sequencer.removeFromList<WIFI_HLE>();
 	}
 
 	if (hle_audio.isTriggered())
@@ -2403,10 +2413,97 @@ const int kIrqWait = 4000;
 const int kMaxWork = 4000;
 
 s32 arm9 = 0;
+s32 arm7 = 0;
 s32 s32next = 0;
 u64 old_next = 0;
 
 EventID nextEvent;
+
+#if 0
+void exec_cpu()
+{
+	NDS_ReschedulePtr = 0;
+
+	s32 s32next = sequencer.popNext(nextEvent);
+
+	u64 nds_timer_base = nds_timer;
+	arm9 = static_cast<s32>(nds_arm9_timer - nds_timer);
+	arm7 = static_cast<s32>(nds_arm7_timer - nds_timer);
+	
+	// Always work in signed time
+	s32 armtime = std::min(arm9, arm7);
+
+	// Pick the CPU whose next event is earliest
+	
+	
+	/*while (armtime < s32next && NDS_ReschedulePtr == 0 )
+	{
+
+		const bool runArm9 = (arm9 <= arm7);
+		
+		if (runArm9)
+		{
+			if (!(NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ) && !nds.freezeBus)
+			{
+				arm9 += armcpu_exec<ARMCPU_ARM9, false>();  // JIT=true per your new path
+			}
+			else
+			{
+				const s32 prev = arm9;
+				arm9 = std::min(s32next, arm9 + kIrqWait);
+				nds.idleCycles[0] += (arm9 - prev);
+	
+				if (gxFIFO.size < 255)
+					nds.freezeBus &= ~1;
+			}
+		}
+		else
+		{
+			const bool cpufreeze = !!(NDS_ARM7.freeze & (CPU_FREEZE_WAIT_IRQ | CPU_FREEZE_OVERCLOCK_HACK));
+	
+			if (!cpufreeze && !nds.freezeBus)
+			{
+				// ARM7 runs at half speed → <<1 after armcpu_exec (like old code)
+			 	arm7 += (armcpu_exec<ARMCPU_ARM7>() << 1);
+			}
+			else
+			{
+				const s32 prev = arm7;
+				arm7 = std::min(s32next, arm7 + kIrqWait);
+				nds.idleCycles[1] += (arm7 - prev);
+			}
+		}
+	
+		// Advance global time by the earliest CPU time
+		armtime = std::min(arm9, arm7);
+		nds_timer = nds_timer_base + armtime;
+
+	}*/
+	
+	if (sequencer.gxfifo.isTriggered())
+	{
+		gfx3d_execute3D();
+	}
+
+	/*printf("IME: %s, IF: %08X, IE: %08X\n",
+		MMU.reg_IME[0] ? "enabled" : "disabled",
+		MMU.gen_IF<0>(),
+		MMU.reg_IE[0]);
+*/
+	/*printf("Status: %s %d cycles, %d idle cycles. Bus %s\n",
+	NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ ? "waiting for IRQ" : "idle",
+	arm9, nds.idleCycles[0], nds.freezeBus ? "frozen" : "unfrozen");*/
+
+	nds_timer = nds_timer_base + armtime;
+
+	nds_arm9_timer = nds_timer_base + arm9;
+	nds_arm9_timer = nds_timer_base + arm7;
+	//nds_arm7_timer = nds_timer_base + arm7;
+
+	
+	sequencer.updateEventCycle(nextEvent, armtime);
+}
+#endif
 
 void exec_cpu()
 {
@@ -2456,6 +2553,12 @@ void exec_cpu()
 	arm9, nds.idleCycles[0], nds.freezeBus ? "frozen" : "unfrozen");*/
 
 	nds_timer = nds_timer_base + arm9;
+	
+	if (sequencer.gxfifo.isTriggered())
+	{
+		gfx3d_execute3D();
+	}
+
 
 	nds_arm9_timer = nds_timer_base + arm9;
 	nds_arm7_timer = nds_timer_base + (arm9 >> 1);
@@ -2473,6 +2576,7 @@ void exec_hw()
 	// since there won't be anything for it to do (everything should be scheduled in the future)
 	sequencer.execHardware();
 }
+
 
 void NDS_setup()
 {
@@ -2500,6 +2604,10 @@ void NDS_setup()
 
 	printf("NDS execution code generated at %p.\n", loop_label);
 
+	extern void check_nitro_sdk();
+	check_nitro_sdk();
+
+	executeARM7Stuff();
 	((void (*)())loop_label)();
 }
 
@@ -2545,7 +2653,7 @@ void execHardware_interrupts()
 	}
 
 	execHardware_interrupts_core<ARMCPU_ARM9>();
-	// execHardware_interrupts_core<ARMCPU_ARM7>();
+	execHardware_interrupts_core<ARMCPU_ARM7>();
 
 	// if we were waiting for an irq, don't wait too long:
 	// let's re-analyze it after this hardware event (this rolls back a big burst of irq waiting which may have been interrupted by a resynch)
@@ -2862,6 +2970,8 @@ bool NDS_FakeBoot()
 
 	// firmware makes system think it's booted from card -- EXTREMELY IMPORTANT!!! This is actually checked by some things. (which things?) Thanks to cReDiAr
 	_MMU_write08<ARMCPU_ARM7>(0x02FFFC40, 0x1); //<zero> removed redundant write to ARM9, this is going to shared main memory. But one has to wonder why r3478 was made which corrected a typo resulting in only ARMCPU_ARM7 getting used.
+	_MMU_write08<ARMCPU_ARM7>(0x27FFC40, 1);
+	_MMU_write08<ARM7>(0x27FFC3C, 0);
 
 	// the chipId is read several times
 	// for some reason, each of those reads get stored here.
@@ -3147,8 +3257,8 @@ void NDS_setTouchPosDirect(u16 x, u16 y)
 	nds.adc_touchX = adc_x;
 	nds.adc_touchY = adc_y;
 
-	nds.scr_touchX = x;
-	nds.scr_touchY = y;
+	nds.scr_touchX =  x << 4;
+	nds.scr_touchY =  y << 4;
 	nds.hw_status.Touching = 1;
 }
 

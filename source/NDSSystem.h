@@ -203,6 +203,22 @@ struct NDSSystem
 	u16 scr_touchX;
 	u16 scr_touchY;
 
+	uint32_t sdk_version_major = 0 ;
+	uint32_t sdk_version_minor = 0 ;
+	uint32_t sdk_version_relstep = 0;
+	bool sdkValid = false;
+
+	inline bool is_twl_sdk()
+	{
+		return (sdk_version_major >= 5);
+	}
+
+	inline bool isSdkValid()
+	{
+		return sdkValid;
+	}
+
+
 	union{  
 
         struct{            

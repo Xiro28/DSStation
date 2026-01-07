@@ -37,6 +37,8 @@
 #ifdef HAVE_JIT
 #include "arm_jit.h"
 #endif
+
+#include "mips_code_emiter.h"
 //#include "melib.h"
 
 //#include "PSP/JobManager.h"
@@ -604,24 +606,6 @@ u32 TRAPUNDEF(armcpu_t* cpu)
 }
 
 
-template<int PROCNUM>
-u32 armcpu_execTFast(){
-	u32 cExecute = thumb_instructions_set[ARMPROC.instruction>>6](ARMPROC.instruction);
-	u32 cFetch = armcpu_prefetch<PROCNUM>();
-	return MMU_fetchExecuteCycles<PROCNUM>(cExecute, cFetch);
-}
-
-template<int PROCNUM>
-u32 armcpu_execAFast()
-{
-	// Usually, fetching and executing are processed parallelly.
-	// So this function stores the cycles of each process to
-	// the variables below, and returns appropriate cycle count.
-	u32 cExecute = arm_instructions_set[INSTRUCTION_INDEX(ARMPROC.instruction)](ARMPROC.instruction);
-	u32 cFetch = armcpu_prefetch<PROCNUM>();
-
-	return MMU_fetchExecuteCycles<PROCNUM>(cExecute, cFetch);
-}
 
 
 template<int PROCNUM>
@@ -642,7 +626,7 @@ u32 armcpu_exec()
 			)
 		{	
 		///	printf("%d\n", INSTRUCTION_INDEX(ARMPROC.instruction));
-			cExecute = arm_instructions_set[INSTRUCTION_INDEX(ARMPROC.instruction)](ARMPROC.instruction);
+			cExecute = arm_instructions_set[PROCNUM][INSTRUCTION_INDEX(ARMPROC.instruction)](ARMPROC.instruction);
 		
 		}
 		else
@@ -653,7 +637,7 @@ u32 armcpu_exec()
 		return MMU_fetchExecuteCycles<PROCNUM>(cExecute, cFetch);
 	}
 
-	cExecute = thumb_instructions_set[ARMPROC.instruction>>6](ARMPROC.instruction);
+	cExecute = thumb_instructions_set[PROCNUM][ARMPROC.instruction>>6](ARMPROC.instruction);
 
 
 	cFetch = armcpu_prefetch<PROCNUM>();
@@ -661,39 +645,10 @@ u32 armcpu_exec()
 	return MMU_fetchExecuteCycles<PROCNUM>(cExecute, cFetch);
 }
 
-template<int PROCNUM>
-u32 FastArmcpu_exec(u32 opcode)
-{
-	// Usually, fetching and executing are processed parallelly.
-	// So this function stores the cycles of each process to
-	// the variables below, and returns appropriate cycle count.
-
-	//if(ARMPROC.CPSR.bits.T == 0)
-	{
-		if (
-			 TEST_COND(CONDITION(opcode), CODE(opcode), ARMPROC.CPSR) //handles any condition
-		   )
-		{	
-			return arm_instructions_set[INSTRUCTION_INDEX(opcode)](opcode);
-		
-		}
-		
-
-		return 1;
-	}
-}
 
 template u32 armcpu_exec<0>();
 template u32 armcpu_exec<1>();
 
-template u32 FastArmcpu_exec<0>(u32 opcode);
-template u32 FastArmcpu_exec<1>(u32 opcode);
-
-template u32 armcpu_execTFast<0>();
-template u32 armcpu_execTFast<1>();
-
-template u32 armcpu_execAFast<0>();
-template u32 armcpu_execAFast<1>();
 
 #ifdef HAVE_JIT
 void arm_jit_sync()
@@ -707,13 +662,17 @@ void arm_jit_sync()
 template<int PROCNUM, bool jit>
 u32 armcpu_exec()
 {
-	if (jit)
+	static u32 last_adr = 0;
+	if constexpr(jit)
 	{
 		ARMPROC.instruct_adr &= ARMPROC.CPSR.bits.T?0xFFFFFFFE:0xFFFFFFFC;
 		ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(ARMPROC.instruct_adr, PROCNUM);
-		//printf("%x\n", ARMPROC.instruct_adr);
-		if (code_block){
 
+		/*if (!code_block)
+			printf("JIT exec %c at %08X %lu\n", PROCNUM?'7':'9', ARMPROC.instruct_adr, emit_getCurrAdr());
+		*/
+		if (code_block){
+			
 			asm volatile(
 				"addiu $sp, $sp, -28\n"
 				"sw $s0, 24($sp)\n"
@@ -727,7 +686,8 @@ u32 armcpu_exec()
 				:
 				: "r" (&ARMPROC)
 			);
-
+			
+			
 			code_block();
 
 			asm volatile(

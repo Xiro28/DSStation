@@ -85,7 +85,7 @@ __attribute__((noinline, aligned(4))) static int meLoop()
       // meDCacheWritebackRange((u32)GPU_Screen, 192 * 256 * 4);
       //syncDrawSc = 1;
       meDCacheWritebackInvalidAll();
-      asm volatile("nop; nop; nop; nop; nop; nop; nop;");
+      asm volatile("sync");
       vrg(0xBC100044) = 1;
     }
   } while (!uncached(_meExit));
@@ -288,7 +288,6 @@ __attribute__((noinline, aligned(4))) int cpuInterruptHandler()
   extern bool drawn;
   drawn = true;
 
-  asm volatile ("sync");
   kcall(&gather);
   // sceKernelDcacheWritebackInvalidateAll();
 

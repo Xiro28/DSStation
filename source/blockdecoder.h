@@ -115,9 +115,11 @@ enum op{
     OP_LDRSB,
     OP_STMIA,
 
+    OP_SWI,
     OP_LSR_0,
 
     OP_CMP = 512,
+    OP_CMN,
     OP_TST,
     OP_AND_S,
     OP_EOR_S,
@@ -125,8 +127,7 @@ enum op{
     OP_ADD_S,
     OP_SUB_S,
     OP_MOV_S,
-    OP_MVN_S,
-    OP_SWI
+    OP_MVN_S
 };
 
 enum opType{
@@ -179,6 +180,7 @@ enum extraFlags {
 
 
 struct opcode{
+    uint32_t bytes;
     uint32_t rd;
     uint32_t rs1;
     uint32_t rs2;
@@ -198,8 +200,9 @@ struct opcode{
     op _op;
     opType preOpType;
 
-    opcode(op opcode, uint32_t rd, uint32_t rs1, uint32_t rs2, uint32_t imm, opType preOpType, uint32_t pc, uint32_t condition, uint32_t extra_flags = EXTFL_NONE){
+    opcode(op opcode, uint32_t bytes, uint32_t rd, uint32_t rs1, uint32_t rs2, uint32_t imm, opType preOpType, uint32_t pc, uint32_t condition, uint32_t extra_flags = EXTFL_NONE){
         this->_op = opcode;
+        this->bytes = bytes;
         this->rd = rd;
         this->rs1 = rs1;
         this->rs2 = rs2;
@@ -269,11 +272,11 @@ class block{
         
 
 
-        void addOP(op _op, uint32_t pc, uint32 rd = -1, uint32 rs1 = -1, uint32 rs2 = -1, uint32_t imm = -1, opType preOpType = PRE_OP_NONE, uint32_t condition = -1, uint32_t extra_flags = EXTFL_SAVECOND){
+        void addOP(op _op, uint32_t bytes, uint32_t pc, uint32 rd = -1, uint32 rs1 = -1, uint32 rs2 = -1, uint32_t imm = -1, opType preOpType = PRE_OP_NONE, uint32_t condition = -1, uint32_t extra_flags = EXTFL_SAVECOND){
             
-            if ((_op >= OP_CMP && _op != OP_SWI) || condition != -1) uses_flags = true;
+            if (_op >= OP_CMP || condition != -1) uses_flags = true;
 
-            opcodes.push_back(opcode(_op, rd, rs1, rs2, imm, preOpType, pc, condition, extra_flags));
+            opcodes.push_back(opcode(_op, bytes, rd, rs1, rs2, imm, preOpType, pc, condition, extra_flags));
 
             containsITP = containsITP || (_op == OP_ITP);
 
@@ -344,11 +347,11 @@ class block{
         u32 start_addr = 0;
 
         char block_hash[1024];
+        std::vector<opcode> opcodes;
 
     private:
         uint32 startAddr;
         uint32 endAddr;
-        std::vector<opcode> opcodes;
         uint32_t reg_usage_end[17] {0}; //-1 register are stored in 0 so the actual registers start at 1
         uint32 getStartAddr();
         uint32 getEndAddr();

@@ -223,6 +223,8 @@ TEMPLATE static u32 WaitByLoop()
 	}
 	else
 		elapsed = cpu->R[0] * 4;
+
+  //printf("elapsed = %llu\n", elapsed);
 	cpu->R[0] = 0;
 	return elapsed;
 }

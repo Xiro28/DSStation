@@ -121,6 +121,7 @@ int psp_addrScreen3DLine[256];
 
 //volatile u8 __attribute__((aligned(64))) GPU_Screen[192 * 256 * 4];
 volatile u8  __attribute__((aligned(64))) *GPU_Screen;
+volatile u8  __attribute__((aligned(64))) *GPU_Screen_extra;
 volatile u8 __attribute__((aligned(64))) *ME_GPU_Screen; //ME scratchpad location
 
  
@@ -1859,6 +1860,7 @@ int Screen_Init()
 	}
 	else{
 		GPU_Screen = (volatile u8*)memalign(16, sizeof(u32) * 192 * 256);
+		GPU_Screen_extra = (volatile u8*)memalign(16, sizeof(u32) * 192 * 256);
 		displ_pointer = GPU_Screen;
 	}
 
@@ -2557,7 +2559,7 @@ void GPU_RenderLine(volatile NDS_Screen * screen, u16 l, bool skip)
 
 		case 2: // Display vram framebuffer
 			{
-				u8 * dst = (u8*)(displ_pointer) + psp_addrScreenLine[l];
+				u8 * dst = (u8*)(gpu->currDst) + psp_addrScreenLine[l];
 				u8 * src = gpu->VRAMaddr + (l*512);
 #ifdef LOCAL_BE
 				for(size_t i = 0; i < 256; i++)

@@ -2864,18 +2864,15 @@ u32 DmaController::read32()
 	return ret;
 }
 
-static INLINE void write_auxspicnt(const int PROCNUM, const int size, const int adr, const int val)
+template <const int PROCNUM, const int size, const int adr>
+static INLINE void write_auxspicnt(const int val)
 {
 	u16 oldCnt = MMU.AUX_SPI_CNT;
 
-	switch(size)
-	{
-		case 16:
-			MMU.AUX_SPI_CNT = val;
-			break;
-		case 8:
-			T1WriteByte((u8*)&MMU.AUX_SPI_CNT, adr, val); 
-			break;
+	if constexpr (size == 16) {
+		MMU.AUX_SPI_CNT = val;
+	} else if constexpr (size == 8) {
+		T1WriteByte((u8*)&MMU.AUX_SPI_CNT, adr, val); 
 	}
 
 	bool csOld = (oldCnt & (1 << 6))?true:false;
@@ -3686,7 +3683,7 @@ void FASTCALL _MMU_ARM9_write08(u32 adr, u8 val)
 			if ((adr >= 0x04000320) && (adr <= 0x040003FF)) return;
 
 		if(MMU_new.is_dma(adr)) { 
-			MMU_new.write_dma<8>(static_cast<DmaRegister>(adr),val); 
+			MMU_new.write_dma<ARM9, 8>(static_cast<DmaRegister>(adr),val); 
 			return;
 		}
 
@@ -3843,9 +3840,14 @@ void FASTCALL _MMU_ARM9_write08(u32 adr, u8 val)
 				break;
 
 			case REG_AUXSPICNT:
-			case REG_AUXSPICNT+1:
-				write_auxspicnt(ARMCPU_ARM9, 8, adr & 1, val);
+			case REG_AUXSPICNT+1:{
+				if (adr & 1){
+					write_auxspicnt<ARMCPU_ARM9, 8, 1> (val);
+				}else{
+					write_auxspicnt<ARMCPU_ARM9, 8, 0> (val);
+				}
 				return;
+			}
 			
 			case REG_AUXSPIDATA:
 			{
@@ -3978,7 +3980,7 @@ void FASTCALL _MMU_ARM9_write16(u32 adr, u16 val)
 			if ((adr >= 0x04000320) && (adr <= 0x040003FF)) return;
 
 		if(MMU_new.is_dma(adr)) { 
-			MMU_new.write_dma<16>(static_cast<DmaRegister>(adr),val); 
+			MMU_new.write_dma<ARM9, 16>(static_cast<DmaRegister>(adr),val); 
 			return;
 		}
 
@@ -4218,7 +4220,7 @@ void FASTCALL _MMU_ARM9_write16(u32 adr, u16 val)
 			}
 
 			case REG_AUXSPICNT:
-				write_auxspicnt(ARMCPU_ARM9, 16, 0, val);
+				write_auxspicnt<ARMCPU_ARM9, 16, 0>(val);
 				return;
 
 			case REG_AUXSPIDATA:
@@ -4517,7 +4519,7 @@ void FASTCALL _MMU_ARM9_write32(u32 adr, u32 val)
 		}
 
 		if(MMU_new.is_dma(adr)) { 
-			MMU_new.write_dma<32>(static_cast<DmaRegister>(adr),val); 
+			MMU_new.write_dma<ARM9, 32>(static_cast<DmaRegister>(adr),val); 
 			return;
 		}
 
@@ -4879,7 +4881,7 @@ u8 FASTCALL _MMU_ARM9_read08(u32 adr)
 	{
 		VALIDATE_IO_REGS_READ(ARMCPU_ARM9, 8);
 		
-		if(MMU_new.is_dma(adr)) return MMU_new.read_dma<8>(static_cast<DmaRegister>(adr));
+		if(MMU_new.is_dma(adr)) return MMU_new.read_dma<ARM9, 8>(static_cast<DmaRegister>(adr));
 
 		switch(adr)
 		{
@@ -4990,7 +4992,7 @@ u16 FASTCALL _MMU_ARM9_read16(u32 adr)
 	{
 		VALIDATE_IO_REGS_READ(ARMCPU_ARM9, 16);
 
-		if(MMU_new.is_dma(adr)) return MMU_new.read_dma<16>(static_cast<DmaRegister>(adr)); 
+		if(MMU_new.is_dma(adr)) return MMU_new.read_dma<ARM9, 16>(static_cast<DmaRegister>(adr)); 
 
 		switch(adr)
 		{
@@ -5110,7 +5112,7 @@ u32 FASTCALL _MMU_ARM9_read32(u32 adr)
 	{
 		VALIDATE_IO_REGS_READ(ARMCPU_ARM9, 32);
 		
-		if(MMU_new.is_dma(adr)) return MMU_new.read_dma<32>(static_cast<DmaRegister>(adr));
+		if(MMU_new.is_dma(adr)) return MMU_new.read_dma<ARM9, 32>(static_cast<DmaRegister>(adr));
 
 		switch(adr)
 		{
@@ -5277,7 +5279,7 @@ void FASTCALL _MMU_ARM7_write08(u32 adr, u8 val)
 	{
 		if (!validateIORegsWrite<ARMCPU_ARM7>(adr, 8, val)) return;
 
-		// PROC OPT if(MMU_new.is_dma(adr)) { MMU_new.write_dma(ARMCPU_ARM7,8,adr,val); return; }
+		if(MMU_new.is_dma(adr)) { MMU_new.write_dma<ARM7, 8>(static_cast<DmaRegister>(adr),val);  return; }
 
 		switch(adr)
 		{
@@ -5319,10 +5321,14 @@ void FASTCALL _MMU_ARM7_write08(u32 adr, u8 val)
 				return;
 
 			case REG_AUXSPICNT:
-			case REG_AUXSPICNT+1:
-				//if (my_config.D_ARM7) return;
-				write_auxspicnt(ARMCPU_ARM7, 8, adr & 1, val);
+			case REG_AUXSPICNT+1:{
+				if (adr & 1){
+					write_auxspicnt<ARMCPU_ARM9, 8, 1> (val);
+				}else{
+					write_auxspicnt<ARMCPU_ARM9, 8, 0> (val);
+				}
 				return;
+			}
 
 			case REG_AUXSPIDATA:
 			{
@@ -5390,7 +5396,7 @@ void FASTCALL _MMU_ARM7_write16(u32 adr, u16 val)
 	{
 		if (!validateIORegsWrite<ARMCPU_ARM7>(adr, 16, val)) return;
 
-		// PROC OPT if(MMU_new.is_dma(adr)) { MMU_new.write_dma(ARMCPU_ARM7,16,adr,val); return; }
+		if(MMU_new.is_dma(adr)) { MMU_new.write_dma<ARM7, 16>(static_cast<DmaRegister>(adr),val);  return; }
 
 		//Address is an IO register
 		switch(adr)
@@ -5433,7 +5439,7 @@ void FASTCALL _MMU_ARM7_write16(u32 adr, u16 val)
 
 			case REG_AUXSPICNT:
 				//if (my_config.D_ARM7) return;
-				write_auxspicnt(ARMCPU_ARM7, 16, 0, val);
+				write_auxspicnt<ARMCPU_ARM7, 16, 0>(val);
 			return;
 
 			case REG_AUXSPIDATA:
@@ -5587,7 +5593,7 @@ void FASTCALL _MMU_ARM7_write32(u32 adr, u32 val)
 		if (!validateIORegsWrite<ARMCPU_ARM7>(adr, 32, val)) return;
 
 
-		// PROC OPT if(MMU_new.is_dma(adr)) { MMU_new.write_dma(ARMCPU_ARM7,32,adr,val); return; }
+		if(MMU_new.is_dma(adr)) { MMU_new.write_dma<ARM7, 32>(static_cast<DmaRegister>(adr),val);  return; }
 
 		switch(adr)
 		{
@@ -5707,6 +5713,8 @@ u8 FASTCALL _MMU_ARM7_read08(u32 adr)
 	if ((adr >> 24) == 4)
 	{
 		VALIDATE_IO_REGS_READ(ARMCPU_ARM7, 8);
+
+		if(MMU_new.is_dma(adr)) return MMU_new.read_dma<ARM7, 8>(static_cast<DmaRegister>(adr));
 		
 		// PROC OPT if(MMU_new.is_dma(adr)) return MMU_new.read_dma(ARMCPU_ARM7,8,adr); 
 
@@ -5763,7 +5771,7 @@ u16 FASTCALL _MMU_ARM7_read16(u32 adr)
 	{
 		VALIDATE_IO_REGS_READ(ARMCPU_ARM7, 16);
 
-		// PROC OPT if(MMU_new.is_dma(adr)) return MMU_new.read_dma(ARMCPU_ARM7,16,adr); 
+		if(MMU_new.is_dma(adr)) return MMU_new.read_dma<ARM7, 16>(static_cast<DmaRegister>(adr));
 
 		switch(adr)
 		{
@@ -5864,7 +5872,7 @@ u32 FASTCALL _MMU_ARM7_read32(u32 adr)
 	{
 		VALIDATE_IO_REGS_READ(ARMCPU_ARM7, 32);
 		
-		// PROC OPT if(MMU_new.is_dma(adr)) return MMU_new.read_dma(ARMCPU_ARM7,32,adr); 
+		if(MMU_new.is_dma(adr)) return MMU_new.read_dma<ARM7, 32>(static_cast<DmaRegister>(adr));
 		
 		switch(adr)
 		{

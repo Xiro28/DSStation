@@ -618,37 +618,37 @@ struct MMU_struct_new
 
 	bool is_dma(const u32 adr);
 
-	template <u32 size>
+	template <int PROCNUM, u32 size>
     inline void write_dma(DmaRegister adr, u32 val) {
         const auto info = computeDmaAddressInfo(adr);
 		switch (info.regnum){
 			case 0:
-				dma[ARM9][info.chan].sad.write<size>(info.offset, val);
+				dma[PROCNUM][info.chan].sad.write<size>(info.offset, val);
 			break;
 			
 			case 1:
-				dma[ARM9][info.chan].dad.write<size>(info.offset, val);
+				dma[PROCNUM][info.chan].dad.write<size>(info.offset, val);
 			break;
 
 			case 2:
-				dma[ARM9][info.chan].ctrl.write<size>(info.offset, val);
+				dma[PROCNUM][info.chan].ctrl.write<size>(info.offset, val);
 			break;
 		}
     }
 
-    template <u32 size>
+    template <int PROCNUM, u32 size>
     inline u32 read_dma(DmaRegister adr) {
         const auto info = computeDmaAddressInfo(adr);
 
 		switch (info.regnum){
 			case 0:
-				return dma[ARM9][info.chan].sad.read<size>(info.offset);
+				return dma[PROCNUM][info.chan].sad.read<size>(info.offset);
 			
 			case 1:
-				return dma[ARM9][info.chan].dad.read<size>(info.offset);
+				return dma[PROCNUM][info.chan].dad.read<size>(info.offset);
 
 			case 2:
-				return dma[ARM9][info.chan].ctrl.read<size>(info.offset);
+				return dma[PROCNUM][info.chan].ctrl.read<size>(info.offset);
 		}
 
 		return 0;
@@ -669,7 +669,7 @@ void triggerDma()
 	
 	/*MACRODO4(0, {
 		const int j=X;
-		MMU_new.dma[1][j].tryTrigger(mode);
+		MMU_new.dma[1][j].tryTrigger<mode>();
 	});*/
 }
 
