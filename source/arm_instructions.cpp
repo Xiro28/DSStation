@@ -6122,9 +6122,38 @@ TEMPLATE static u32 FASTCALL  OP_LDC_OPTION(const u32 i)
 //   MCR / MRC
 //-----------------------------------------------------------------------------
 
+bool force_interrupt_check(const uint32_t i)
+{
+	const u32 cp15_reg = (REG_POS(i,16)<<16) | (REG_POS(i,0)<<8) | ((i>>5)&0x7);
+
+	if (cp15_reg == 0x070004 || cp15_reg == 0x070802)
+	{
+		NDS_ARM9.CPSR.bits.I = 0;
+
+		// Interrupts enabled, force an interrupt check
+		NDS_ARM9.freeze |= CPU_FREEZE_IRQ_IE_IF;
+
+		return true;
+	}
+
+	return false;
+}
+
 TEMPLATE static u32 FASTCALL  OP_MCR(const u32 i)
 {
 	u32 cpnum = REG_POS(i, 8);
+
+	/*
+		 let cn = (inst.opcode >> 16) & 0xF;
+        let cm = inst.opcode & 0xF;
+        let cp = (inst.opcode >> 5) & 0x7;
+
+        let cp15_reg = (cn << 16) | (cm << 8) | cp;
+        if cp15_reg == 0x070004 || cp15_reg == 0x070802 
+	*/
+
+	if (force_interrupt_check(i))
+		return 4;
 	
 	if(cpnum != 15)
 	{
@@ -6143,6 +6172,9 @@ TEMPLATE static u32 FASTCALL  OP_MCR(const u32 i)
 TEMPLATE static u32 FASTCALL  OP_MRC(const u32 i)
 {
 	//if (PROCNUM != 0) return 1;
+
+	if (force_interrupt_check(i))
+		return 4;
 
 	u32 cpnum = REG_POS(i, 8);
 	

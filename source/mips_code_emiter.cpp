@@ -117,8 +117,15 @@ void initCodeCache(){
 }
 
 void resetCodeCache(){
+	if (!CodeCache) return;  // FIX: guardia null
+
     memset(CodeCache, 0, CODE_SIZE);
     LastAddr = 0;
+	currentCodeCache = CodeCache;
+    // FIX: invalidazione completa dell'icache dopo aver azzerato
+    sceKernelDcacheWritebackInvalidateAll();
+    sceKernelIcacheInvalidateAll();
+	
 	//make_address_range_executable((u32)CodeCache, (u32)CodeCache + CODE_SIZE);
 }
 

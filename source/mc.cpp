@@ -422,6 +422,12 @@ BackupDevice::~BackupDevice()
 	fpMC = NULL;
 }
 
+void BackupDevice::loadToBuffer(u8* buf, u32 offset, u32 size)
+{
+	fpMC->fseek(offset, SEEK_SET);
+	fpMC->fread(buf, size);
+}
+
 int BackupDevice::readFooter()
 {
 	// Check if the footer data exists.

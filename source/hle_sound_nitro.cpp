@@ -517,17 +517,17 @@ void Reset()
 
 */
 
-void readDriverInfo(SNDDriverInfo* driverInfoAddr)
+void readDriverInfo(u32 driverInfoAddr)
 {
     // Implement full memcpy
 
     for (int i = 0; i < 16; i++)
     {
-        u32 val = SPU_ReadWord((0x4000400 + ((int)i) * 0x10));
-        _MMU_ARM7_write32((u32)&driverInfoAddr->channelControls[i], val);
+        u32 val = SPU_ReadWord(0x04000400 + (i*16));
+        _MMU_ARM7_write32(driverInfoAddr + 0x1180 + (i * 4), SPU_ReadByte(0x403 + (i*0xf)));
     }
 
-    _MMU_ARM7_write32((u32)&driverInfoAddr->lockedChannels, sLockedChannelMask);
+    _MMU_ARM7_write32(driverInfoAddr + 0x11C4, sLockedChannelMask);
 }
 
 void OnAlarm(u32 num)
@@ -1447,6 +1447,17 @@ void ProcessCommands()
                 }
                 break;
 
+            case 0x15: // set channel pan
+                {
+                    for (int i = 0; i < 16; i++)
+                    {
+                        if (!(args[0] & (1<<i))) continue;
+
+                        SetChannelPan(i, args[1]);
+                    }
+                }
+                break;
+
             case 0x16: // set surround decay
                 {
                     SurroundDecay = args[0];
@@ -1564,9 +1575,9 @@ void ProcessCommands()
                 u32 weak = args[1];
 
                 if (weak & 1){
-                    sWeakLockedChannelMask &= ~chnmask;
+                    sWeakLockedChannelMask &= !chnmask;
                 }else{
-                    sLockedChannelMask &= ~chnmask;
+                    sLockedChannelMask &= !chnmask;
                 }
 
             }
@@ -1671,7 +1682,7 @@ void ProcessCommands()
 
             case 0x21: // Read driver info
             {
-                readDriverInfo((SNDDriverInfo*)args[0]);
+                readDriverInfo(args[0]);
             }
             break;
 

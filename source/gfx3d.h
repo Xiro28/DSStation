@@ -611,13 +611,11 @@ struct VIEWPORT {
 };
 
 //PSP GU
-struct Vertex
-{
-	//u16 color;
-	float u, v;
-	unsigned int col;
-	float x, y, z;
-};
+struct Vertex {
+    float u, v;      // texture coords
+    u32   col;       // 0xAABBGGRR  ← GU usa ABGR, non ARGB/RGBA!
+    float x, y, z;
+} __attribute__((packed, aligned(4)));
 
 //ok, imagine the plane that cuts diagonally across a cube such that it clips
 //out to be a hexagon. within that plane, draw a quad such that it cuts off

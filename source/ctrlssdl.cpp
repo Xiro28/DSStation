@@ -30,6 +30,8 @@
 #include <pspdisplay.h>
 #include <pspkernel.h>
 
+#include "armcpu.h"
+
 #include "GPU.h"
 
 #define NB_KEYS 12

@@ -2394,17 +2394,20 @@ void gfx3d_glFlush(u32 v)
 
 static inline bool gfx3d_ysort_compare_orig(int num1, int num2)
 {
-	const POLY &poly1 = polylist->list[num1];
-	const POLY &poly2 = polylist->list[num2];
+    const POLY &poly1 = polylist->list[num1];
+    const POLY &poly2 = polylist->list[num2];
 
-	if(poly1.maxy != poly2.maxy) 
-		return poly1.maxy < poly2.maxy; 
-	if(poly1.miny != poly2.miny) 
-		return poly1.miny < poly2.miny; 
+    if(poly1.maxy != poly2.maxy) 
+        return poly1.maxy < poly2.maxy;
+    if(poly1.miny != poly2.miny) 
+        return poly1.miny < poly2.miny;
 
-	return num1 < num2;
+    // CAMBIA: usa maxz come tiebreak finale
+    if(poly1.maxz != poly2.maxz)
+        return poly1.maxz > poly2.maxz;  // Z più grande = più lontano = disegna prima
+
+    return num1 < num2;
 }
-
 static inline bool gfx3d_ysort_compare_kalven(int num1, int num2)
 {
 	const POLY &poly1 = polylist->list[num1];
@@ -2496,62 +2499,50 @@ static void gfx3d_doFlush()
 	const int polycount = polylist->count;
 
 
-	for (size_t i = 0; i < polycount; i++)
-	{
-		// TODO: Possible divide by zero with the w-coordinate.
-		// Is the vertex being read correctly? Is 0 a valid value for w?
-		// If both of these questions answer to yes, then how does the NDS handle a NaN?
-		// For now, simply prevent w from being zero.
-		POLY &poly = polylist->list[i];
-		float verty = vertlist->list[poly.vertIndexes[0]].y;
-		float vertw = (vertlist->list[poly.vertIndexes[0]].w != 0.0f) ? vertlist->list[poly.vertIndexes[0]].w : 0.00000001f;
-		verty = 1.0f-(verty+vertw)/(2*vertw);
-		poly.miny = poly.maxy = verty;
+for (size_t i = 0; i < polycount; i++)
+{
+    POLY &poly = polylist->list[i];
+    
+    float verty = vertlist->list[poly.vertIndexes[0]].y;
+    float vertw = (vertlist->list[poly.vertIndexes[0]].w != 0.0f) ? vertlist->list[poly.vertIndexes[0]].w : 0.00000001f;
+    verty = 1.0f-(verty+vertw)/(2*vertw);
+    poly.miny = poly.maxy = verty;
 
-		for (size_t j = 1; j < poly.type; j++)
-		{
-			verty = vertlist->list[poly.vertIndexes[j]].y;
-			vertw = (vertlist->list[poly.vertIndexes[j]].w != 0.0f) ? vertlist->list[poly.vertIndexes[j]].w : 0.00000001f;
-			verty = 1.0f-(verty+vertw)/(2*vertw);
-			poly.miny = min(poly.miny, verty);
-			poly.maxy = max(poly.maxy, verty);
-		}
+    // AGGIUNTO: calcola minz/maxz
+    float vertz = vertlist->list[poly.vertIndexes[0]].z;
+    float nz = (vertz + vertw) / (2.0f * vertw);
+    poly.minz = poly.maxz = nz;
 
-	}
+    for (size_t j = 1; j < poly.type; j++)
+    {
+        verty = vertlist->list[poly.vertIndexes[j]].y;
+        vertw = (vertlist->list[poly.vertIndexes[j]].w != 0.0f) ? vertlist->list[poly.vertIndexes[j]].w : 0.00000001f;
+        verty = 1.0f-(verty+vertw)/(2*vertw);
+        poly.miny = min(poly.miny, verty);
+        poly.maxy = max(poly.maxy, verty);
+
+        // AGGIUNTO
+        vertz = vertlist->list[poly.vertIndexes[j]].z;
+        nz = (vertz + vertw) / (2.0f * vertw);
+        poly.minz = min(poly.minz, nz);
+        poly.maxz = max(poly.maxz, nz);
+    }
+}
 
 
-	//we need to sort the poly list with alpha polys last
-	//first, look for opaque polys
 	size_t ctr = 0;
-	for (size_t i = 0; i < polycount; i++)
-	{
-		const POLY &poly = polylist->list[i];
-		if (!poly.isTranslucent())
-			gfx3d.indexlist.list[ctr++] = i;
-	}
-	const size_t opaqueCount = ctr;
+for (size_t i = 0; i < polycount; i++)
+    gfx3d.indexlist.list[ctr++] = i;
+
+// Sorta TUTTO per Y insieme (opachi e traslucenti insieme)
+if (my_config.sort_3d)
+{
+    std::stable_sort(gfx3d.indexlist.list,
+                     gfx3d.indexlist.list + polycount,
+                     gfx3d_ysort_compare);
+}
+
 	
-	//then look for translucent polys
-	for (size_t i = 0; i < polycount; i++)
-	{
-		const POLY &poly = polylist->list[i];
-		if (poly.isTranslucent())
-			gfx3d.indexlist.list[ctr++] = i;
-	}
-
-	//NOTE: the use of the stable_sort below must be here as a workaround for some compilers on osx and linux.
-	//we're hazy on the exact behaviour of the resulting bug, all thats known is the list gets mangled somehow.
-	//it should not in principle be relevant since the predicate results in no ties.
-	//perhaps the compiler is buggy. perhaps the predicate is wrong.
-
-	//now we have to sort the opaque polys by y-value.
-	//(test case: harvest moon island of happiness character cretor UI)
-	//should this be done after clipping??
-    if (my_config.sort_3d)
-	{
-		std::stable_sort(gfx3d.indexlist.list, gfx3d.indexlist.list + opaqueCount, gfx3d_ysort_compare);
-		std::stable_sort(gfx3d.indexlist.list, gfx3d.indexlist.list + opaqueCount, gfx3d_zsort_compare);
-	}
 	//gfx3d.processed_polylist = gfx3d.polylist;
 	//gfx3d.processed_vertlist = gfx3d.vertlist;
 	//gfx3d.processed_indexlist = gfx3d.indexlist; 

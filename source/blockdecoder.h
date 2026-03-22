@@ -87,6 +87,7 @@ enum op{
     OP_DMA,
     OP_3D_FIFO,
     OP_3D_CMD,
+    OP_HALT_HACK,
 
 
 
@@ -184,7 +185,7 @@ struct opcode{
     uint32_t rd;
     uint32_t rs1;
     uint32_t rs2;
-    uint32_t imm;
+    int32_t imm;
     uint32_t op_pc;
     uint32_t condition;
     uint32_t extra_flags;

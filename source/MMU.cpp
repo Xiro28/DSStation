@@ -1183,9 +1183,21 @@ constexpr std::array<uint32_t, SQRT_TABLE_SIZE> generateSqrtTable() {
 constexpr std::array<uint32_t, SQRT_TABLE_SIZE> sqrt_table = generateSqrtTable();
 
 
-static void execsqrt() {
+void makesqrtdirty() {
+	MMU_new.sqrt.dirty = true;
+	MMU.sqrtRunning = TRUE;
+	NDS_Reschedule();
+}
+
+void execsqrt() {
 	u32 ret;
 	const u8 mode = MMU_new.sqrt.mode;
+
+	if (!MMU_new.sqrt.dirty)
+		return; //no need to recompute
+
+	MMU_new.sqrt.dirty = false;
+
 	MMU_new.sqrt.busy = 1;
 
 	if (mode) { 
@@ -1222,54 +1234,27 @@ static void execsqrt() {
 
 	MMU.sqrtCycles = nds_timer + 26;
 	MMU.sqrtResult = ret;
-	MMU.sqrtRunning = TRUE;
+}
+
+void makedivdirty() {
+	MMU_new.div.dirty = true;
+	MMU.divRunning = TRUE;
 	NDS_Reschedule();
 }
 
-/*std::map<std::string, s64> cached_div;
-std::map<std::string, bool> IScached_div;
-
-void itoa(long long int value, char* result) {
-
-	// check that the base if valid
-	static const char conversionTable[] = "0123456789abcdef";
-
-	char* out = result;
-
-	u64 quotient = value;
-
-	do {
-
-		*out = conversionTable[quotient % 16];
-
-		++out;
-
-		quotient >>= 4;
-
-	} while (quotient);
-
-	if (value < 0) *out++ = '-';
-
-	std::reverse(result, out);
-
-	*out = 0;
-}
-
-char* mystrcat(char* dest, char* src)
-{
-	while (*dest) dest++;
-	while (*dest++ = *src++);
-	return --dest;
-}*/
-
-static void execdiv() {
+void execdiv() {
 
 	s64 num,den;
 	s64 res,mod;
 	u8 mode = MMU_new.div.mode;
+
+	if (!MMU_new.div.dirty)
+		return; //no need to recompute
+
+	MMU_new.div.dirty = false;
+
 	MMU_new.div.busy = 1;
 	MMU_new.div.div0 = 0;
-	
 
 	switch(mode)
 	{
@@ -1303,24 +1288,6 @@ static void execdiv() {
 	}
 	else
 	{
-		/*char _strIndex[64];
-		_strIndex[0] = '\0';
-		char* pStr = _strIndex;
-		char _tmp[8];
-		itoa(num, _strIndex);
-		itoa(den, _tmp);
-		pStr = mystrcat(pStr, _tmp);
-
-		const bool cached = IScached_div[_strIndex];
-
-		if (!cached) {
-			res = num / den;
-			cached_div[_strIndex] = res;
-			IScached_div[_strIndex] = true;
-		}
-		else {
-			res = cached_div[_strIndex];
-		}*/
 		res = num / den;
 		mod = num % den;
 	}
@@ -1338,8 +1305,6 @@ static void execdiv() {
 
 	MMU.divResult = res;
 	MMU.divMod = mod;
-	MMU.divRunning = TRUE;
-	NDS_Reschedule();
 }
 
 DSI_TSC::DSI_TSC()
@@ -4067,7 +4032,7 @@ void FASTCALL _MMU_ARM9_write16(u32 adr, u16 val)
 
 			case REG_DIVCNT:
 					MMU_new.div.write16(val);
-					execdiv();
+					makedivdirty();
 				return;
 #if 1
 			case REG_DIVNUMER:
@@ -4083,7 +4048,7 @@ void FASTCALL _MMU_ARM9_write16(u32 adr, u16 val)
 #endif
 			case REG_SQRTCNT:
 				MMU_new.sqrt.write16(val);
-				execsqrt();
+				makesqrtdirty();
 				return;
 
 			case REG_DISPA_BLDCNT: 	 
@@ -4745,48 +4710,36 @@ void FASTCALL _MMU_ARM9_write32(u32 adr, u32 val)
 			}
 
 			case REG_DIVNUMER:
-				if (T1ReadLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x290) != val){
-					T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x290, val);
-					execdiv();
-				}
+				T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x290, val);
+				makedivdirty();
 				return;
 			case REG_DIVNUMER+4:
-				if (T1ReadLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x294) != val){
-					T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x294, val);
-					execdiv();
-				}				
+				T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x294, val);
+				makedivdirty();
 				return;
 
             case REG_DIVDENOM :
 				{
-					if (T1ReadLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x298) != val){
-						T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x298, val);
-						execdiv();
-					}				
+					T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x298, val);
+					makedivdirty();			
 					return;
 				}
 			case REG_DIVDENOM+4 :
 				{
-					if (T1ReadLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x29C) != val){
-						T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x29C, val);
-						execdiv();
-					}				
+					T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x29C, val);
+					makedivdirty();
 					return;
 				}
 
 			case REG_SQRTPARAM :
 			{
-				if (T1ReadLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x2B8) != val){
-					T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x2B8, val);
-					execsqrt();
-				}
+				T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x2B8, val);
+				makesqrtdirty();
 				return;
 			}
 			case REG_SQRTPARAM+4 :
-			if (T1ReadLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x2BC) != val){
 				T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x2BC, val);
-				execsqrt();
-			}
+				makesqrtdirty();
 				return;
 			
 			case REG_IPCSYNC:

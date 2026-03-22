@@ -6,7 +6,7 @@
 class register_manager
 {
    public:
-      void reset()
+      void reset(bool thumb = false)
       {
          memset(mapping, 0xFF, sizeof(mapping));
          memset(usage_tag, 0, sizeof(usage_tag));
@@ -14,6 +14,7 @@ class register_manager
          memset(weak, 0, sizeof(weak));
          //memset(sp_reg_pushed, false, sizeof(sp_reg_pushed));
          next_usage_tag = 1;
+         this->thumb = thumb;
       }
 
       bool is_usable(psp_gpr_t reg) const
@@ -23,6 +24,9 @@ class register_manager
       }
 
    private:
+      
+      bool thumb = false;
+
       psp_gpr_t find(uint32_t emu_reg_id)
       {
          for (int i = psp_s0; i < psp_s4; i ++)
@@ -81,6 +85,7 @@ class register_manager
                return true;
             }
          }
+         return false;
       }
 
       void map(uint32_t emu_reg_id, psp_gpr_t native_reg)
@@ -106,9 +111,9 @@ class register_manager
             else
             {
                if (emu_reg_ids[i] == 15){
-                  emu_reg_ids[i] = psp_v1;
-                  emit_addiu(psp_v1, psp_fp, 4);
-                  found[i] = true;
+                     emu_reg_ids[i] = psp_v1;
+                     emit_addiu(psp_v1, psp_fp, thumb ? 2 : 4);  // FIX
+                     found[i] = true;
                }else{
                   int32_t current = get_loaded(emu_reg_ids[i] & 0xF, emu_reg_ids[i] & 0x10);
                   if (current >= 0)

@@ -88,6 +88,8 @@ void HLE_Reset(){
     WiFIReset();
 }
 
+uint8_t buffer[8192];
+
 void OnIPCRequest_CartSave(u32 data)
 {
     if (SM_DataPos == 0)
@@ -128,14 +130,45 @@ void OnIPCRequest_CartSave(u32 data)
 
             
 
-            printf("SAVEMEM: read %08X %08X %08X %08X\n", offset, dst, len, memlen);
+            //printf("SAVEMEM: read %08X %08X %08X %08X\n", offset, dst, len, memlen);
+
             
-            if (memlen > 0)
-                for (u32 i = 0; i < len; i++)
+            u32 remaining = len;
+            u32 currOffset = offset;
+            u32 currDst = dst;
+
+            while (remaining > 0)
+            {
+                u32 toRead = (remaining > sizeof(buffer)) ? sizeof(buffer) : remaining;
+                MMU_new.backupDevice.loadToBuffer(buffer, currOffset & memlen, toRead);
+
+                for (u32 i = 0; i < toRead; i++)
+                {
+                    _MMU_write08<ARMCPU_ARM7>(currDst + i, buffer[i]);
+                }
+
+                currOffset += toRead;
+                currDst += toRead;
+                remaining -= toRead;
+            }
+
+            /*for (u32 i = 0; i < len;)
+                {
+
+                    u32 val = 0xff;
+                    
+                    if (i + 4 <= len)
                     {
-                        u8 val= MMU_new.backupDevice.readByte((offset + i) & memlen, 0);
-                        _MMU_write08<ARMCPU_ARM7>(dst + i, val);
+                        val = MMU_new.backupDevice.readWord((offset + i) & memlen, 0xffffffff);
+                        _MMU_write32<ARMCPU_ARM7>(dst + i, val);
+                        i += 4;
+                        continue;
                     }
+                    
+                    MMU_new.backupDevice.readByte((offset + i) & memlen, 0xff);
+                    _MMU_write08<ARMCPU_ARM7>(dst + i, val);
+                    i += 1;
+                }*/
 
                     SendIPCReply(0xB, 0x1, 1);
             
@@ -203,7 +236,7 @@ void OnIPCRequest_Cart(u32 data)
 
 void Touchscreen_Sample()
 {
-    u32 ts = _MMU_read16<ARMCPU_ARM7>(0x027FFFAA) | (_MMU_read16<ARMCPU_ARM7>(0x027FFFAC) << 16);
+    u32 ts = (((u32)_MMU_read16<ARMCPU_ARM7>(0x027FFFAA)) | ((u32)_MMU_read16<ARMCPU_ARM7>(0x027FFFAC) << 16));
     
     if (!nds.hw_status.Touching)
     {
@@ -709,9 +742,9 @@ void OnIPCRequest()
         break;
 
     case 0xF:
-        if (data == 0x10000)
+        //if (data == 0x10000)
         {
-            SendIPCReply(0xF, 0x10000);
+            SendIPCReply(0xF, data);
         }
         break;
 
@@ -756,7 +789,7 @@ void executeARM7Stuff(){
 
    int fram_counter = _MMU_read32<ARMCPU_ARM7>(0x27FFC3C);
     _MMU_write32<ARM7>(0x27FFC3C, fram_counter+1);
-    
+
     if (nds.is_twl_sdk()){
         bool sync = _MMU_read08<ARMCPU_ARM7>(0x2FFFFF0) & 0x1;
         _MMU_write08<ARM7>(0x2FFFFF1, !sync);

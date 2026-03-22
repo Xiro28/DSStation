@@ -76,7 +76,7 @@ void emitThumbOP(opcode& op){
 
             regman.mark_dirty(dst);
 
-            flag_dirty = true;                  
+            flag_dirty = flag_dirty || (op.saveZ || op.saveN || op.saveC || op.saveV);
         }
         break; 
 
@@ -121,11 +121,11 @@ void emitThumbOP(opcode& op){
                     emit_xor(psp_t2, psp_t2, psp_t1);
                     emit_ins(psp_gp, psp_t2, _flag_V8, _flag_V8);
                 }
+                flag_dirty = flag_dirty || (op.saveZ || op.saveN || op.saveC || op.saveV);
             }
 
             regman.mark_dirty(dst);
 
-            flag_dirty = true;
         }
         break;
 
@@ -155,10 +155,30 @@ void emitThumbOP(opcode& op){
                     emit_sltiu(psp_t0, dst, 1);
                     emit_ins(psp_gp, psp_t0, _flag_Z8, _flag_Z8);
                 }
+
+                 if (op.saveC){
+                    emit_sltu(psp_t0, dst, rs1);
+                    emit_ins(psp_gp, psp_t0, _flag_C8, _flag_C8);
+                }
+
+                if (op.saveV){
+                    if (op.preOpType == PRE_OP_IMM){
+                        emit_li(psp_t1, op.imm);
+                        emit_xor(psp_t2, rs1, psp_t1);  // rs1 ^ imm
+                    } else {
+                        emit_xor(psp_t2, rs1, rs2);      // rs1 ^ rs2
+                    }
+                    emit_xor(psp_t3, rs1, dst);          // rs1 ^ dst
+                    emit_nor(psp_t2, psp_t2, psp_zero);  // ~(rs1^rs2)
+                    emit_and(psp_t2, psp_t3, psp_t2);
+                    emit_srl(psp_t2, psp_t2, 31);
+                    emit_ins(psp_gp, psp_t2, _flag_V8, _flag_V8);
+                }
+
+                flag_dirty = flag_dirty || (op.saveZ || op.saveN || op.saveC || op.saveV);   
             }
 
             regman.mark_dirty(dst);
-            flag_dirty = true;
         }
         break;
 
@@ -186,7 +206,7 @@ void emitThumbOP(opcode& op){
 
             regman.mark_dirty(dst); 
 
-            flag_dirty = true;          
+            flag_dirty = flag_dirty || (op.saveZ || op.saveN);            
         }
         break;
 
@@ -213,7 +233,7 @@ void emitThumbOP(opcode& op){
 
             regman.mark_dirty(dst);
 
-            flag_dirty = true; 
+            flag_dirty = flag_dirty || (op.saveZ || op.saveN);   
         }
         break;
 
@@ -237,16 +257,17 @@ void emitThumbOP(opcode& op){
                 emit_ins(psp_gp, psp_t0, _flag_Z8, _flag_Z8);
             } 
 
-            flag_dirty = true;         
+            flag_dirty = flag_dirty || (op.saveZ || op.saveN);          
         }
         break;
 
         case OP_SWI:
         {
-            uint32_t optmizeDelaySlot = emit_SlideDelay();
+            //uint32_t optmizeDelaySlot = emit_SlideDelay();
 
             emit_jal(cpu->swi_tab[op.rs1]);
-            emit_Write32(optmizeDelaySlot);
+            emit_nop(); // safety
+            //emit_Write32(optmizeDelaySlot);
         }
         break;
 
@@ -380,12 +401,12 @@ void emitThumbOP(opcode& op){
             regman.flush_all();
 
             if (op._op == OP_LDR){
-                emit_sll(regs[0], psp_a0, 3);
+                emit_sll(psp_t0, psp_a0, 3);            // t0 = (addr & 3) * 8
 
                 emit_jal(_MMU_read32<PROCNUM>);
-                emit_ins(psp_a0, psp_zero, 1, 0);
+                emit_ins(psp_a0, psp_zero, 1, 0);       // addr &= ~3
 
-                emit_rotrv(regs[0], psp_v0, regs[0]);
+                emit_rotrv(regs[0], psp_v0, psp_t0);   // FIX: usa t0, non regs[0]
 
             }else{
                 emit_jal(_MMU_read16<PROCNUM>);

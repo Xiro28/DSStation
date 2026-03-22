@@ -87,6 +87,8 @@ public:
 	u16 readWord(u32 addr, const u16 init);
 	u32 readLong(u32 addr, const u32 init);
 
+	void loadToBuffer(u8* buf, u32 offset, u32 size);
+
 	u8  readByte(const u8 init);
 	u16 readWord(const u16 init);
 	u32 readLong(const u32 init);

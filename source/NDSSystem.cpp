@@ -608,8 +608,9 @@ static void desmume_cycle()
 			}
 
 			// Render the screen (using 3D frame-skipping state)
-			if (frame_drawn)
+			if (frame_drawn){
 				EMU_SCREEN(ShouldSkip2dFrame(), ShouldSkip3dFrame());
+			}
 		}
 	}
 	else
@@ -624,6 +625,8 @@ static void desmume_cycle()
 
 	if (my_config.showfps)
 		ShowFPS(0, 3);
+
+	EMU_SCREEN_Finish(); 
 
 	/*if (my_config.enable_sound)
 		SPU_Emulate_user();*/
@@ -1445,6 +1448,10 @@ struct TSequenceItem_divider : public TSequenceItem
 	void exec()
 	{
 		//		IF_DEVELOPER(DEBUG_statistics.sequencerExecutionCounters[2]++);
+		extern void execdiv();
+
+		execdiv();
+
 		MMU_new.div.busy = 0;
 #ifdef HOST_64
 		T1WriteQuad(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x2A0, MMU.divResult);
@@ -1476,6 +1483,10 @@ struct TSequenceItem_sqrtunit : public TSequenceItem
 	FORCEINLINE void exec()
 	{
 		//		IF_DEVELOPER(DEBUG_statistics.sequencerExecutionCounters[3]++);
+		extern void execsqrt();
+
+		execsqrt();
+
 		MMU_new.sqrt.busy = 0;
 		T1WriteLong(MMU.MMU_MEM[ARMCPU_ARM9][0x40], 0x2B4, MMU.sqrtResult);
 		MMU.sqrtRunning = FALSE;
@@ -2513,46 +2524,29 @@ void exec_cpu()
 
 	u64 nds_timer_base = nds_timer;
 	arm9 = (s32)(nds_arm9_timer - nds_timer);
+	
 	while (arm9 < s32next && NDS_ReschedulePtr == 0)
 	{
-		if (!(NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ) && !nds.freezeBus)
+		arm9 += armcpu_exec<ARMCPU_ARM9, true>();  // JIT=true per your new path
+		nds_timer = nds_timer_base + arm9;
+
+		if ((NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ) || nds.freezeBus)
 		{
-
-			arm9 += armcpu_exec<ARMCPU_ARM9, true>();
-
-			// Idle loop optimization:
-			// If the CPU is in an idle loop state, immediately set arm9 to s32next,
-			// effectively fast-forwarding the simulation.
-			if (NDS_ARM9.idle_loop && arm9 < s32next)
-			{
-				arm9 = s32next;
-				break;
-			}
-
-			nds_timer = nds_timer_base + arm9;
-		}
-		else
-		{
-			s32 temp = arm9;
+			nds.idleCycles[0] += (s32next - arm9);
 			arm9 = s32next; // Jump directly to the next event // std::min(s32next, arm9 + kIrqWait);
-			nds.idleCycles[0] += (arm9 - temp);
 
 			if (nds.freezeBus && gxFIFO.size < 255)
 				nds.freezeBus &= ~1;
 
-			// If we are waiting for an IRQ, we need to reschedule the next check
-			/*if (NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ) {
-				nds_arm9_timer = nds_timer_base + arm9;
-				NDS_ReschedulePtr = 1;
-			}*/
+			break;
 		}
 	}
+
+	nds_timer = nds_timer_base + arm9;
 
 	/*printf("Status: %s %d cycles, %d idle cycles. Bus %s\n",
 	NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ ? "waiting for IRQ" : "idle",
 	arm9, nds.idleCycles[0], nds.freezeBus ? "frozen" : "unfrozen");*/
-
-	nds_timer = nds_timer_base + arm9;
 	
 	if (sequencer.gxfifo.isTriggered())
 	{
@@ -2580,6 +2574,9 @@ void exec_hw()
 
 void NDS_setup()
 {
+	extern void check_nitro_sdk();
+	check_nitro_sdk();
+
 	u32 last_addr = emit_Set(0);
 	set_code_cache(NDS_exec_code);
 
@@ -2603,9 +2600,6 @@ void NDS_setup()
 	set_code_cache(NULL);
 
 	printf("NDS execution code generated at %p.\n", loop_label);
-
-	extern void check_nitro_sdk();
-	check_nitro_sdk();
 
 	executeARM7Stuff();
 	((void (*)())loop_label)();

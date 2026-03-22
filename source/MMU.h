@@ -151,10 +151,11 @@ class DivController
 {
 public:
 	DivController()
-		: mode(0), busy(0)
+		: mode(0), busy(0), dirty(false)
 	{}
 	void exec();
 	u8 mode, busy, div0;
+	bool dirty;
 	u16 read16() { return mode|(busy<<15)|(div0<<14); }
 	void write16(u16 val) { 
 		mode = val&3;
@@ -168,10 +169,11 @@ class SqrtController
 {
 public:
 	SqrtController()
-		: mode(0), busy(0)
+		: mode(0), busy(0), dirty(false)
 	{}
 	void exec();
 	u8 mode, busy;
+	bool dirty;
 	u16 read16() { return mode|(busy<<15); }
 	void write16(u16 val) { mode = val&1; }
 	void savestate(EMUFILE* os);

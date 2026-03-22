@@ -10,7 +10,7 @@
 #define TEXTURE_FLAGS_COLOR_NT (GU_COLOR_5551 | GU_VERTEX_16BIT | GU_TRANSFORM_2D)
 #define TEXTURE_R3D_FLAGS (GU_TEXTURE_16BIT | GU_VERTEX_16BIT | GU_TRANSFORM_3D)
 
-extern unsigned int __attribute__((aligned(16))) gulist[256 * 192 * 4];
+extern unsigned int __attribute__((aligned(64))) gulist[256 * 1024 / 4];
 
 void Init_PSP_DISPLAY_FRAMEBUFF();
 
@@ -29,6 +29,7 @@ void OSLFINISH();
 
 void SetupDisp_EMU();
 void EMU_SCREEN(bool, bool);
+void EMU_SCREEN_Finish(); 
 void StartGU_RENDER();
 void ENDGU_RENDER();
 void SEND_DISP();

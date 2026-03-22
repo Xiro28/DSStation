@@ -1860,7 +1860,6 @@ int Screen_Init()
 	}
 	else{
 		GPU_Screen = (volatile u8*)memalign(16, sizeof(u32) * 192 * 256);
-		GPU_Screen_extra = (volatile u8*)memalign(16, sizeof(u32) * 192 * 256);
 		displ_pointer = GPU_Screen;
 	}
 
@@ -2536,12 +2535,14 @@ void GPU_RenderLine(volatile NDS_Screen * screen, u16 l, bool skip)
 	//generate the 2d engine output
 	if(gpu->dispMode == 1) {
 		//optimization: render straight to the output buffer when thats what we are going to end up displaying anyway
-		gpu->tempScanline = screen->gpu->currDst = (u8*)(displ_pointer)+psp_addrScreenLine[l] + sub_index;//+(screen->offset + l) * 512;//(u8 *)(GPU_Screen) + psp_addrScreenLine[l] + sub_index;
+		gpu->tempScanline = gpu->currDst = (u8*)(displ_pointer)+psp_addrScreenLine[l] + sub_index;//+(screen->offset + l) * 512;//(u8 *)(GPU_Screen) + psp_addrScreenLine[l] + sub_index;
 	} else {
 		//otherwise, we need to go to a temp buffer
-		gpu->tempScanline = screen->gpu->currDst = (u8 *)gpu->tempScanlineBuffer;
+		gpu->tempScanline = gpu->currDst = (u8 *)gpu->tempScanlineBuffer;
 	}
-	
+
+	GPU_RenderLine_layer(screen, l);
+
 	switch (gpu->dispMode)
 	{
 		case 0: // Display Off(Display white)
@@ -2559,8 +2560,8 @@ void GPU_RenderLine(volatile NDS_Screen * screen, u16 l, bool skip)
 
 		case 2: // Display vram framebuffer
 			{
-				u8 * dst = (u8*)(gpu->currDst) + psp_addrScreenLine[l];
-				u8 * src = gpu->VRAMaddr + (l*512);
+				u8 * dst = (u8*)(displ_pointer)+psp_addrScreenLine[l];
+				u8 * src = gpu->VRAMaddr + (l * 512);
 #ifdef LOCAL_BE
 				for(size_t i = 0; i < 256; i++)
 				{
@@ -2582,13 +2583,6 @@ void GPU_RenderLine(volatile NDS_Screen * screen, u16 l, bool skip)
 			break;
 	}
 
-
-	if (!gpu->LayersEnable[0] && !gpu->LayersEnable[1] && 
-			!gpu->LayersEnable[2] && !gpu->LayersEnable[3] && 
-				!gpu->LayersEnable[4]) return;
-
-	GPU_RenderLine_layer(screen, l);
-
 	//capture after displaying so that we can safely display vram before overwriting it here
 	/*if (gpu->core == GPU_MAIN) 
 	{
@@ -2599,7 +2593,7 @@ void GPU_RenderLine(volatile NDS_Screen * screen, u16 l, bool skip)
 		if (l == 191) { disp_fifo.head = disp_fifo.tail = 0; }
 	}*/
 
-	//GPU_RenderLine_MasterBrightness(gpu, l);
+	GPU_RenderLine_MasterBrightness(gpu, l);
 
 }
 

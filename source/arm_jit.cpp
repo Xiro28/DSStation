@@ -179,23 +179,46 @@ struct Function
 
 // gp_regs = >R8
 
-extern "C" void post_hle()
+extern "C" void post_hle(u32 cycles = 1)
 {
    uint32_t addr = NDS_ARM9.R[14];
 
    NDS_ARM9.CPSR.bits.T = BIT0(addr);
-   NDS_ARM9.R[15] = addr & ~0x3u; // allineamento a 4 byte
+   NDS_ARM9.R[15] = addr;
    NDS_ARM9.next_instruction = NDS_ARM9.R[15];
    NDS_ARM9.instruct_adr = NDS_ARM9.R[15];
 
-   printf("[HLE] Returning to 0x%08X (CPU=%s)\n",
-          NDS_ARM9.R[15],
-          "ARM9");
+   // assign to v0 the return value of the HLE function, if any
+   register u32 v0 asm("v0") = cycles; 
 }
 
 extern "C" void hle_mi_cpu_clear32(uint32_t guest_pc)
 {
-   // TODO: implementazione
+   /*
+       let value = regs.gp_regs[0];
+    let dst = regs.gp_regs[1];
+    let len = regs.gp_regs[2] >> 2;
+
+    if likely(len > 0) {
+        asm.emu.mem_write_multiple_memset::<CPU, true, u32>(dst, value, len as usize);
+    }
+
+    hle_post_function::<CPU>(asm, 1 + len * 6 + 3, guest_pc);
+   */
+
+   uint32_t value = NDS_ARM9.R[0];
+   uint32_t dst = NDS_ARM9.R[1];
+   uint32_t len = NDS_ARM9.R[2] >> 2;
+
+   if (len > 0)
+   {
+      for (uint32_t i = 0; i < len; ++i)
+      {
+         _MMU_ARM9_write32(dst + i * 4, value);
+      }
+   }
+   
+   post_hle(1 + len * 6 + 3);
 }
 
 extern "C" void hle_mi_gx_fifo_send48b(u32 guest_pc)
@@ -222,7 +245,12 @@ extern "C" void hle_mi_gx_fifo_send48b(u32 guest_pc)
 }
 
 static const std::vector<Function> FUNCTIONS_ARM9 = {
-    {GX_FIFO_SEND48B, std::size(GX_FIFO_SEND48B), "GX_FIFO_SEND48B", hle_mi_gx_fifo_send48b}};
+    //{GX_FIFO_SEND48B, std::size(GX_FIFO_SEND48B), "GX_FIFO_SEND48B", hle_mi_gx_fifo_send48b},
+      {MI_CPU_CLEAR32, std::size(MI_CPU_CLEAR32), "MI_CPU_CLEAR32", hle_mi_cpu_clear32},
+      /*{CP_SAVE_CONTEXT, std::size(CP_SAVE_CONTEXT), "CP_SAVE_CONTEXT", hle_mi_cpu_clear32},
+      {CP_RESTORE_CONTEXT, std::size(CP_RESTORE_CONTEXT), "CP_RESTORE_CONTEXT", hle_mi_cpu_clear32}*/
+
+};
 
 /*
 
@@ -297,11 +325,13 @@ static void init_jit_mem()
 {
    static bool inited = false;
 
+   if (inited)
+      return;
+
    for (int i = 0; i < 0x4000; i++)
       JIT.JIT_MEM[i] = JIT_MEM[i >> 9] + (((i << 14) & JIT_MASK[i >> 9]) >> 1);
 
-   if (inited)
-      return;
+   
 
    inited = true;
    initCodeCache();
@@ -532,14 +562,7 @@ static INSTR_R ARM_OP_ADC_IMM_VAL(uint32_t pc, const u32 i) { return INTERPRET; 
 // TS3 crasha qui
 static INSTR_R ARM_OP_MOV_LSL_IMM(uint32_t pc, const u32 i)
 {
-   if (i != 0xE1A00000)
-   {
-      if (!full_block)
-         return INTERPRET;
-
-      currentBlock.addOP(OP_MOV, i, pc, REG_POS(i, 12), REG_POS(i, 16), REG_POS(i, 0), ((i >> 7) & 0x1F), PRE_OP_LSL_IMM, instr_is_conditional(i) ? CONDITION(i) : -1, EXTFL_NONE);
-   }
-
+   currentBlock.addOP(OP_MOV, i, pc, REG_POS(i, 12), REG_POS(i, 16), REG_POS(i, 0), ((i >> 7) & 0x1F), PRE_OP_LSL_IMM, instr_is_conditional(i) ? CONDITION(i) : -1, EXTFL_NONE);
    return DYNAREC;
 }
 
@@ -607,13 +630,14 @@ static INSTR_R ARM_OP_CMP_IMM_VAL(uint32_t pc, const u32 i)
    /*if (instr_is_conditional(i))
    return INTERPRET; */
 
-   return INTERPRET;
+   if (!full_block)
+      return INTERPRET;
 
    currentBlock.addOP(OP_CMP, i, pc, i, REG_POS(i, 16), -1, ROR((i & 0xFF), (i >> 7) & 0x1E), PRE_OP_IMM, instr_is_conditional(i) ? CONDITION(i) : -1, EXTFL_NONE);
    return DYNAREC;
 }
 
-/*ARM_OP_IMM(CMN, LSL_IMM)
+ARM_OP_IMM(CMN, LSL_IMM)
 ARM_OP_REG(CMN, LSL_REG)
 ARM_OP_IMM(CMN, LSR_IMM)
 ARM_OP_REG(CMN, LSR_REG)
@@ -623,12 +647,10 @@ ARM_OP_IMM(CMN, ROR_IMM)
 ARM_OP_REG(CMN, ROR_REG)
 static INSTR_R ARM_OP_CMN_IMM_VAL(uint32_t pc, const u32 i)
 {
-
    return INTERPRET;
-
    currentBlock.addOP(OP_CMN, i, pc, i, REG_POS(i,16), -1, ROR((i&0xFF), (i>>7)&0x1E), PRE_OP_IMM, instr_is_conditional(i) ? CONDITION(i) : -1,EXTFL_NONE);
    return DYNAREC;
-}*/
+}
 
 // ARM_OP_UNDEF(CMP );
 // ARM_OP_UNDEF(TST );
@@ -642,7 +664,7 @@ ARM_OP_UNDEF(ADC_S);
 ARM_OP_UNDEF(SBC_S);
 ARM_OP_UNDEF(RSC_S);
 ARM_OP_UNDEF(TEQ);
-ARM_OP_UNDEF(CMN);
+//ARM_OP_UNDEF(CMN);
 ARM_OP_UNDEF(ORR_S);
 ARM_OP_UNDEF(MOV_S);
 ARM_OP_UNDEF(BIC_S);
@@ -656,8 +678,6 @@ static INSTR_R ARM_OP_MUL(uint32_t pc, const u32 i)
 
 static INSTR_R ARM_OP_MLA(uint32_t pc, const u32 i)
 {
-   if (!full_block)
-      return INTERPRET;
    currentBlock.addOP(OP_MLA, i, pc, REG_POS(i, 16), REG_POS(i, 0), REG_POS(i, 8), REG_POS(i, 12), PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
    return DYNAREC;
 }
@@ -775,7 +795,7 @@ ARM_MEM_OP_DEF(LDRB);
    {                                                                                                                                                        \
       currentBlock.WriteOP = true;                                                                                                                          \
       u32 val = get_addr(_ARMPROC.R[REG_POS(i, 16)], VAL, MODE, i);                                                                                         \
-      if (is3DCMD(val))                                                                                                                                     \
+      /*if (is3DCMD(val))                                                                                                                                   \
       {                                                                                                                                                     \
          currentBlock.addOP(OP_3D_CMD, i, pc, -1, REG_POS(i, 12), -1, val, PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1, EXTFL_NONE);           \
       }                                                                                                                                                     \
@@ -785,10 +805,9 @@ ARM_MEM_OP_DEF(LDRB);
       }                                                                                                                                                     \
       else if (isDMA(val))                                                                                                                                  \
       {                                                                                                                                                     \
-         return INTERPRET;                                                                                                                                  \
          currentBlock.addOP(OP_DMA, i, pc, -1, REG_POS(i, 12), REG_POS(i, 16), VAL, (opType)MODE, instr_is_conditional(i) ? CONDITION(i) : -1, EXTFL_NONE); \
       }                                                                                                                                                     \
-      else                                                                                                                                                  \
+      else*/                                                                                                                                                \
       {                                                                                                                                                     \
          currentBlock.addOP(OP_STR, i, pc, REG_POS(i, 16), REG_POS(i, 12), REG_POS(i, 0),                                                                   \
                             VAL,                                                                                                                            \
@@ -836,7 +855,7 @@ u32 get_addr(u32 addr, s32 shift_op, u32 type, u32 i)
 #define GEN_ARM_LDR_OP_FUNC(Name, MODE, VAL)                                           \
    static INSTR_R Name(uint32_t pc, const u32 i)                                       \
    {                                                                                   \
-      if (!full_block || REG_POS(i, 12) == 15 || REG_POS(i, 16) == 15)                 \
+      if (!full_block || (MODE != PRE_OP_IMM && MODE != PRE_OP_IMM_PRE_P && MODE != PRE_OP_IMM_PRE_M && MODE != PRE_OP_IMM_POST_P && MODE != PRE_OP_IMM_POST_M))                                                                 \
          return INTERPRET;                                                             \
       interpreted_cycles += 2;                                                         \
       u32 val = get_addr(_ARMPROC.R[REG_POS(i, 16)], VAL, MODE, i);                    \
@@ -1015,6 +1034,8 @@ static INSTR_R ARM_OP_BL(uint32_t pc, const u32 i)
 //-----------------------------------------------------------------------------
 //   MRS / MSR
 //-----------------------------------------------------------------------------
+
+
 static INSTR_R ARM_OP_MRS_CPSR(uint32_t pc, const u32 i)
 {
    currentBlock.MCROP = true;
@@ -1036,20 +1057,38 @@ static INSTR_R ARM_OP_MRS_SPSR(uint32_t pc, const u32 i)
 static INSTR_R ARM_OP_SWP(uint32_t pc, const u32 i) { return INTERPRET; };
 static INSTR_R ARM_OP_SWPB(uint32_t pc, const u32 i) { return INTERPRET; };
 
+bool isHaltHackInstruction(u32 i)
+{
+   const u32 cp15_reg = (REG_POS(i,16)<<16) | (REG_POS(i,0)<<8) | ((i>>5)&0x7);
+	return (cp15_reg == 0x070004 || cp15_reg == 0x070802);
+}
+
+
 static INSTR_R ARM_OP_MCR(uint32_t pc, const u32 i)
 {
+   if (isHaltHackInstruction(i))
+   {
+      currentBlock.addOP(OP_HALT_HACK, i, pc, REG_POS(i, 12), -1, -1, -1, PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
+      return DYNAREC;
+   }
+
    currentBlock.MCROP = true;
    return INTERPRET;
 }
 static INSTR_R ARM_OP_MRC(uint32_t pc, const u32 i)
 {
+   if (isHaltHackInstruction(i))
+   {
+      currentBlock.addOP(OP_HALT_HACK, i, pc, REG_POS(i, 12), -1, -1, -1, PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
+      return DYNAREC;
+   }
+
    currentBlock.MCROP = true;
    return INTERPRET;
 }
 
 static INSTR_R ARM_OP_SWI(uint32_t pc, const u32 i)
 {
-   return INTERPRET;
    currentBlock.addOP(OP_SWI, i, pc, -1, ((i >> 16) & 0x1F), -1, -1, PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
    return DYNAREC;
 }
@@ -1334,6 +1373,9 @@ static INSTR_R THUMB_OP_ROR_REG(uint32_t pc, const u32 i)
 static INSTR_R THUMB_OP_MOV_SPE(uint32_t pc, const u32 i)
 {
    u32 Rd = _REG_NUM(i, 0) | ((i >> 4) & 8);
+
+   if (Rd == 15)
+        return INTERPRET;
 
    currentBlock.addOP(OP_MOV, i, pc, Rd, REG_POS(i, 3));
    return DYNAREC;
@@ -1669,6 +1711,36 @@ void post_hle_block_emit(u32 block_start_addr, u32 base_adr, u32 interpreted_cyc
    JIT_COMPILED_FUNC(base_adr, ARM9) = (uintptr_t)block_start_addr;
 }
 
+int executed_cycles = 0;
+int continue_cpu_exec(u32 cycles)
+{
+   extern s32 s32next;
+   extern s32 arm9;
+
+   executed_cycles += cycles;
+
+    if ((arm9 + executed_cycles) > s32next || NDS_ReschedulePtr == 1){
+      const int tmp = executed_cycles;
+      executed_cycles = 0;
+      return tmp;
+    }
+    
+	if (!(NDS_ARM9.freeze & CPU_FREEZE_IRQ_IE_IF) && !nds.freezeBus){
+        ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(NDS_ARM9.instruct_adr, ARM9);
+
+		if (code_block)
+         return code_block();
+
+      const int tmp = executed_cycles;
+      executed_cycles = 0;
+      return tmp + arm_jit_compile<ARM9>();
+    }
+
+   const int tmp = executed_cycles;
+   executed_cycles = 0;
+   return tmp;
+}
+
 bool first_time = true;
 template <int PROCNUM>
 void compile_basicblock()
@@ -1700,14 +1772,8 @@ void compile_basicblock()
       emit_sw(psp_at, RCPU, _instr_adr);
    }
 
-   if (currentBlock.JumpOP)
-   {
-      emit_addiu(psp_v0, psp_v0, interpreted_cycles);
-   }
-   else
-   {
-      emit_addiu(psp_v0, psp_zero, interpreted_cycles);
-   }
+   emit_jal(continue_cpu_exec);
+   emit_movi(psp_a0, interpreted_cycles);
 
    emit_mpop(1, reg_gpr + psp_ra);
 
@@ -1717,8 +1783,8 @@ void compile_basicblock()
    make_address_range_executable((u32)code_ptr, (u32)emit_GetPtr());
    JIT_COMPILED_FUNC(base_adr, PROCNUM) = (uintptr_t)code_ptr;
 
-   // Align the code to 16 bytes
-   while (emit_getCurrAdr() & 0xF)
+   // Align the code to 4 bytes
+   while (emit_getCurrAdr() & 0x3)
       emit_nop();
 }
 
@@ -1791,7 +1857,7 @@ inline bool is_mcr_mrc(uint32_t opcode)
 }
 
 template <int PROCNUM>
-void build_ArmBasicblock(uint16_t max_opcodes = 64, bool include_branches = false)
+void build_ArmBasicblock(uint16_t max_opcodes = 128, bool include_branches = false)
 {
 
    uint32_t opnum = 0;
@@ -1815,16 +1881,11 @@ void build_ArmBasicblock(uint16_t max_opcodes = 64, bool include_branches = fals
       DynaCompiler fc = arm_instruction_compilers[INSTRUCTION_INDEX(op)];
       INSTR_R res = fc == 0 ? INTERPRET : fc(pc, op);
 
-      has_ended = (!include_branches && instr_is_branch(op)) || (opnum >= max_opcodes);
+      has_ended = (!include_branches && instr_is_branch(op)) || (opnum >= max_opcodes) || (!include_branches && isHaltHackInstruction(op));
 
       currentBlock.WriteOP = currentBlock.WriteOP || isARMWritingInstruction(op);
       currentBlock.MCROP = currentBlock.MCROP || is_mcr_mrc(op);
 
-      if (pc == 0x01FF8010 || pc == 0x01FF8014)
-      {
-         // printf("hit infinite loop\n");
-         // continue;
-      }
 
       if (res == INTERPRET)
       {
@@ -1873,7 +1934,7 @@ void build_ThumbBasicblock()
       if (res == INTERPRET)
          currentBlock.addOP(OP_ITP, op, pc, -1, op, -1, -1, PRE_OP_NONE, false);
 
-      has_ended = instr_is_branch(op) || (i >= 64);
+      has_ended = instr_is_branch(op) || (i >= 128);
 
       if (has_ended && (!instr_does_prefetch(op) || res == INTERPRET)) // prefetch next instruction
          currentBlock.manualPrefetch = true;
@@ -1980,12 +2041,12 @@ bool emit_nitrosdk_func(uint32_t guest_pc, bool thumb)
    if (!nds.isSdkValid() || thumb)
       return false;
 
+   const uint32_t old_pc = pc;
+
    if (nds.is_twl_sdk() && ((guest_pc & 0xFFFF000) == 0x1FF8000))
    {
       int idx = 0;
       constexpr int cycles[2] = {20, 7};
-
-      const uint32_t old_pc = pc;
 
       for (const auto &func : MICROCODE_FUNCTIONS)
       {
@@ -2015,6 +2076,32 @@ bool emit_nitrosdk_func(uint32_t guest_pc, bool thumb)
       }
    }
 
+   const std::vector<Function> *functions = &FUNCTIONS_ARM9;
+
+   
+   interpreted_cycles = 1;
+   for (const auto &func : *functions)
+   {      
+      pc = old_pc;
+      currentBlock.clearBlock();
+      build_ArmBasicblock<ARM9>(func.opcode_count - 1, true);
+      if (func.equals(currentBlock.opcodes))
+      {
+         printf("[JIT] %s found at 0x%08X, psp equivalent: 0x%X (CPU=%s)\n",
+                func.name,
+                currentBlock.start_addr,
+                emit_getCurrAdr(),
+                "ARM9");
+         u32 addr = pre_hle_block_emit();
+         emit_jal(func.hle_function);
+         emit_nop();
+         post_hle_block_emit(addr, base_adr, 4);
+         return true;
+      }
+   }
+
+   pc = old_pc;
+   currentBlock.clearBlock();
    return false;
 }
 
@@ -2031,7 +2118,7 @@ u32 arm_jit_compile()
    base_adr = ARMPROC.instruct_adr;
    pc = base_adr;
 
-   if (GetFreeSpace() < 2 * 1024)
+   if (GetFreeSpace() < 4 * 1024)
    {
       // printf("Dynarec code reset\n");
       arm_jit_reset(true, true);
@@ -2063,6 +2150,8 @@ u32 arm_jit_compile()
       return code_block();
    }
 
+   //return op_decode[PROCNUM][thumb]();
+
    pc = base_adr;
    currentBlock.start_addr = base_adr;
    currentBlock.clearBlock();
@@ -2077,6 +2166,8 @@ u32 arm_jit_compile()
       return interpreted_cycles * 1.1;
    }
    */
+
+
 
    if (thumb)
    {
@@ -2166,9 +2257,12 @@ void check_nitro_sdk()
    currentBlock.start_addr = pc;
    build_ArmBasicblock<1>(256, true);
 
+   pc = NDS_ARM9.instruct_adr;
+
    if (currentBlock.getNOpcodes() < 3)
    {
       printf("Not enough instructions in the block\n");
+      currentBlock.clearBlock();
       return;
    }
 
@@ -2179,12 +2273,14 @@ void check_nitro_sdk()
       if (inst0.rd != 12 || inst0.imm != 0x4000000) // Check correctness
       {
          printf("First instruction is not MOV R12, #0x04000000\n");
+         currentBlock.clearBlock();
          return;
       }
       break;
 
    default:
       printf("DEFAULT: First instruction is not MOV R12, #0x04000000\n");
+      currentBlock.clearBlock();
       return;
    }
 
@@ -2202,12 +2298,14 @@ void check_nitro_sdk()
           inst1.imm != 0x208)
       {
          printf("Second instruction is not STRH R12, [R12, #0x208]\n");
+         currentBlock.clearBlock();
          return;
       }
       break;
    }
    default:
       printf("DEFAULT: Second instruction is not STRH R12, [R12, #0x208]: %x\n", inst1._op);
+      currentBlock.clearBlock();
       return;
    }
 
@@ -2247,6 +2345,7 @@ void check_nitro_sdk()
    if (start_module_params_addr == 0)
    {
       printf("StartModuleParams address not found\n");
+      currentBlock.clearBlock();
       return;
    }
 
@@ -2264,6 +2363,7 @@ void check_nitro_sdk()
    if (sdk_nitro_code_le != __builtin_bswap32(sdk_nitro_code_be))
    {
       printf("Nitro SDK signature mismatch\n");
+      currentBlock.clearBlock();
       return;
    }
 
@@ -2334,6 +2434,8 @@ void check_nitro_sdk()
          break;
       }
    }
+
+   currentBlock.clearBlock();
 }
 
 template u32 arm_jit_compile<0>();

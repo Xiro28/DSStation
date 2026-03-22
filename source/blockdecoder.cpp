@@ -187,21 +187,18 @@ static void FASTCALL _STRH(u32 regs, u32 imm)
 
 void emit_li(u32 reg, u32 data, u32 sz = 0)
 {
+    if (data == 0 && sz == 0) {           // FAST PATH
+        emit_move(reg, psp_zero);
+        return;
+    }
     if (is_u16(data) && sz != 2)
-    {
         emit_ori(reg, psp_zero, data & 0xFFFF);
-    }
     else if (is_s16(data) && sz != 2)
-    {
         emit_movi(reg, data & 0xFFFF);
-    }
-    else
-    {
+    else {
         emit_lui(reg, data >> 16);
         if ((sz == 2) || (data & 0xFFFF))
-        {
             emit_ori(reg, reg, data & 0xFFFF);
-        }
     }
 }
 
@@ -288,15 +285,17 @@ void CompleteCondition(u32 cond, u32 _addr, u32 label)
         emit_bnelC(psp_s4, psp_zero, label, _addr);
 }
 bool saved = false;
+
+static int prefetch_skip = 1;
+void emit_prefetch_reset() { prefetch_skip = 1; }
+
 void emit_prefetch(const u8 isize, bool updateR15, bool store)
 {
-
-    static int skip = 1;
 
     if (updateR15 || store)
     {
 
-        emit_addiu(psp_fp, psp_fp, isize * skip);
+        emit_addiu(psp_fp, psp_fp, isize * prefetch_skip);
 
         if (store)
             emit_sw(psp_fp, RCPU, _next_instr);
@@ -307,10 +306,10 @@ void emit_prefetch(const u8 isize, bool updateR15, bool store)
         if (store)
             emit_sw(psp_at, RCPU, _R15);
 
-        skip = 1;
+        emit_prefetch_reset();
     }
     else
-        skip++;
+        prefetch_skip++;
 }
 
 INLINE void emit_bic(u32 dst, u32 a0, u32 a1)
@@ -817,6 +816,12 @@ void write_dma(u32 val, u32 i, s32 shift_op, u32 type)
     MMU_new.write_dma<ARM9, size>(static_cast<DmaRegister>(adr), val);
 }
 
+void arm_halt_hack()
+{
+    NDS_ARM9.CPSR.bits.I = 0;
+	NDS_ARM9.freeze |= CPU_FREEZE_WAIT_IRQ;
+}
+
 template <int PROCNUM>
 void emitARMOP(opcode &op, const bool last_op)
 {
@@ -1107,6 +1112,7 @@ void emitARMOP(opcode &op, const bool last_op)
                 store_flags();
                 flag_dirty = false;
             } else emit_nop();)
+        break;
     }
 
     case OP_MOV:
@@ -1679,6 +1685,13 @@ void emitARMOP(opcode &op, const bool last_op)
         ) break;
     }
 
+    case OP_HALT_HACK:
+    {
+        emit_jal(arm_halt_hack);
+        emit_nop(); 
+        break;
+    }
+
     case OP_STMIA:
     case OP_NOP:
     case OP_LSR_0:
@@ -1703,12 +1716,6 @@ void emitARMOP(opcode &op, const bool last_op)
 #include "precompiled_ops.h"
 
 
-void emit_block_prolog()
-{
-    //emit_jal(fun);
-    //emit_nop();
-}
-
 template <int PROCNUM>
 bool block::emitThumbBlock()
 {
@@ -1717,6 +1724,7 @@ bool block::emitThumbBlock()
 
     // reg_alloc.reset(); 
 
+    regman.reset(true);
     emit_li(psp_fp, opcodes.front().op_pc);
 
     opcode last_op = opcodes.back();
@@ -1734,7 +1742,7 @@ bool block::emitThumbBlock()
         if ((op._op == OP_ITP || op._op == OP_SWI))
         {
             regman.flush_all();
-            regman.reset();
+            regman.reset(true);
         }
         /*else
         regman.push_sp_reg(3, regs);*/
@@ -1754,8 +1762,9 @@ bool block::emitThumbBlock()
         store_flags();
     flag_dirty = false;
 
+    emit_prefetch_reset();
     regman.flush_all();
-    regman.reset();
+    regman.reset(true);
 
     // regman.pull_sp_regs();
 
@@ -1815,7 +1824,8 @@ bool block::emitArmBlock()
 
     check_flags()
 
-        regman.flush_all();
+    emit_prefetch_reset();
+    regman.flush_all();
     regman.reset();
 
     /*if (!JumpOP)
