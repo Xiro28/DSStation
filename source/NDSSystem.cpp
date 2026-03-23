@@ -617,8 +617,9 @@ static void desmume_cycle()
 	{
 		// SPU_Emulate_core();
 		// SPU_Emulate_user();
-		const int sz_SCR = 256 * 192 * 4;
-		sceDmacMemcpy(&((u8 *)(0x04100000))[0], (u8 *)&GPU_Screen[0], sz_SCR);
+		const int sz_SCR = 512 * 192 * 2;
+		sceDmacMemcpy((void*)(0x04100000), (void*)&GPU_Screen[0], sz_SCR);
+        sceDmacMemcpy((void*)(0x04100000 + sz_SCR), (void*)&GPU_Screen_extra[0], sz_SCR);
 		renderScreenFull();
 		EMU_SCREEN(frameSkipper.ShouldSkip2D(), frameSkipper.ShouldSkip3D());
 	}

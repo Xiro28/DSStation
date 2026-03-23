@@ -230,7 +230,12 @@ void SetupTexture(POLY& thePoly)
     // GU_GEQUAL is correct: passes when incoming depth >= buffer value.
     // Buffer starts at 0, first poly at any depth >= 0 passes. Correct.
     if (attr.enableDepthTest) {
-        sceGuDepthFunc(GU_GEQUAL);  // FIX: was GU_LESS / GU_EQUAL
+    
+        if (polyAttr.decalMode) {
+            sceGuDepthFunc(GU_LEQUAL); // 1 = Sovrascrive i poligoni alla stessa profondità
+        } else {
+            sceGuDepthFunc(GU_LESS);   // 0 = Rifiuta a parità di Z (Il background fallisce e resta DIETRO i bottoni!)
+        }
         sceGuEnable(GU_DEPTH_TEST);
     } else {
         sceGuDepthFunc(GU_ALWAYS);
@@ -306,10 +311,13 @@ FORCEINLINE void mainLoop()
     const float screenX_off = _3dOnTop ? 0.0f : 240.0f;
     const float screenY_top = 40.0f;
 
-    sceGuDepthRange(65535, 0);      // reversed: nz=0→65535(near), nz=1→0(far)
-	sceGuDepthFunc(GU_GEQUAL);      // near vince (valore più grande)
-	sceGuClearDepth(0);             // clear a 0 = tutto lontano
-	sceGuClear(GU_COLOR_BUFFER_BIT | GU_DEPTH_BUFFER_BIT);
+    sceGuEnable(GU_DEPTH_TEST);
+    sceGuDepthFunc(GU_LEQUAL);      
+    sceGuDepthMask(GU_FALSE);       // ABILITA la scrittura (False = Scrittura ON su PSP)
+    
+    // Puliamo lo Z-Buffer al valore "LONTANO"
+    sceGuClearDepth(65535);         
+    sceGuClear(GU_DEPTH_BUFFER_BIT);
 
 
     // FIX B: scissor ai pixel PSP corretti per questo schermo
@@ -356,8 +364,8 @@ FORCEINLINE void mainLoop()
         if (lastPolyAttr != poly.polyAttr) {
             flushBatch();
             lastPolyAttr = poly.polyAttr;
+            polyAttr.setup(poly.polyAttr); 
             SetupPoly(poly);
-            polyAttr.setup(poly.polyAttr);
         }
 
         if (!polyAttr.isVisible(poly.backfacing) &&
@@ -412,18 +420,24 @@ FORCEINLINE void mainLoop()
             out.v = v.v;
 
             // Prospettiva
-            const float inv_w = 1.0f / v.w;
-            const float nx = v.x * inv_w;
-            const float ny = v.y * inv_w;
-            const float nz = v.z * inv_w;  // [0,1] NDS, 0=near
+			const float inv_w = 1.0f / v.w;
+        const float nx = v.x * inv_w;
+        const float ny = v.y * inv_w;
+        
+        // Z normalizzata da 0.0 (vicino) a 1.0 (lontano)
+        float nz = (v.z * inv_w + 1.0f) * 0.5f;
 
-            const float vw = viewport.width  ? (float)viewport.width  : 256.0f;
-            const float vh = viewport.height ? (float)viewport.height : 192.0f;
+        const float vw = viewport.width  ? (float)viewport.width  : 256.0f;
+        const float vh = viewport.height ? (float)viewport.height : 192.0f;
 
-            out.x = (nx + 1.0f) * (vw * 0.5f) + viewport.x + screenX_off;
-            out.y = 232.0f - ((ny + 1.0f) * (vh * 0.5f) + viewport.y);
+        out.x = (nx + 1.0f) * (vw * 0.5f) + viewport.x + screenX_off;
+        out.y = 232.0f - ((ny + 1.0f) * (vh * 0.5f) + viewport.y);
 
-            out.z = nz;
+        if (nz < 0.0f) nz = 0.0f;
+        if (nz > 1.0f) nz = 1.0f;
+
+        // Distribuiamo la Z sui 16-bit
+        out.z = 65535.0f * nz;
         }
 
         if (batching) batched_draws += vcnt;

@@ -55,6 +55,7 @@
 #define DISABLE_MOSAIC
 
 extern BOOL click;
+bool draw_front_pixels = false;
 volatile NDS_Screen MainScreen __attribute__((aligned(16)));
 volatile NDS_Screen SubScreen  __attribute__((aligned(16)));
 
@@ -68,6 +69,7 @@ CACHE_ALIGN u8 sprWin[256];
 
 
 u16			gpu_angle = 0;
+int sub_index = 0;
 
 const size sprSizeTab[4][4] = 
 {
@@ -595,19 +597,6 @@ FORCEINLINE void GPU::renderline_checkWindows(u16 x, bool &draw, bool &effect) c
 template<BlendFunc FUNC, bool WINDOW>
 FORCEINLINE FASTCALL void GPU::_master_setFinal3dColor(int dstX, int srcX)
 {
-	int x = dstX;
-	int passing = dstX<<1;
-	u8* color = &_3dColorLine[srcX<<2];
-	u8 red = color[0];
-	u8 green = color[1];
-	u8 blue = color[2];
-	u8 alpha = color[3];
-	u8* dst = currDst;
-
-	u32 final = RGB15(0,0,0,0);
-	
-	HostWriteWord(dst, passing, final);
-	bgPixels[x] = 0;
 }
 
 
@@ -753,17 +742,6 @@ FORCEINLINE void GPU::setFinalColorBG(u16 color, const u32 x)
 
 FORCEINLINE void GPU::setFinalColor3d(int dstX, int srcX)
 {
-	switch(setFinalColor3d_funcNum)
-	{
-	case 0x0: _master_setFinal3dColor<NoBlend,false>(dstX,srcX); break;
-	case 0x1: _master_setFinal3dColor<Blend,false>(dstX,srcX); break;
-	case 0x2: _master_setFinal3dColor<Increase,false>(dstX,srcX); break;
-	case 0x3: _master_setFinal3dColor<Decrease,false>(dstX,srcX); break;
-	case 0x4: _master_setFinal3dColor<NoBlend,true>(dstX,srcX); break;
-	case 0x5: _master_setFinal3dColor<Blend,true>(dstX,srcX); break;
-	case 0x6: _master_setFinal3dColor<Increase,true>(dstX,srcX); break;
-	case 0x7: _master_setFinal3dColor<Decrease,true>(dstX,srcX); break;
-	};
 }
 template <bool effects>
 FORCEINLINE void setFinalColorSpr(GPU* gpu, u8 *dst, u16 color, u8 alpha, u8 type, u16 x)
@@ -1853,25 +1831,19 @@ int Screen_Init()
 	extern bool isEmu;
 	if (!isEmu)
 	{
-		
 		ME_GPU_Screen = vrp((CACHED_KERNEL_MASK | ME_EDRAM_BASE));
-		//ME_GPU_Screen = vrp((GE_EDRAM_BASE | UNCACHED_USER_MASK | 0x100000));
 		displ_pointer = ME_GPU_Screen;
+		GPU_Screen_extra = ME_GPU_Screen + (sizeof(u32) * 192 * 256);
 	}
 	else{
 		GPU_Screen = (volatile u8*)memalign(16, sizeof(u32) * 192 * 256);
+        // ALLOCA IL FRONT BUFFER PER IL PC
+		GPU_Screen_extra = (volatile u8*)memalign(16, sizeof(u32) * 192 * 256);
 		displ_pointer = GPU_Screen;
+
+		memset((void*)GPU_Screen, 0, sizeof(u32) * 192 * 256);
+		memset((void*)GPU_Screen_extra, 0, sizeof(u32) * 192 * 256);
 	}
-
-	/*volatile u8 * buff = displ_pointer;
-
-	memset((void*)buff, 0, sizeof(GPU_Screen));
-	for(int i = 0; i < (256*192*4); i++)
-		*(buff++) = 0x7FFF;
-
-	//printf("GPU_Screen: %08X\n", (u32)displ_pointer);
-	/*if (osd)  {delete osd; osd =NULL; }
-	osd  = new OSDCLASS(-1);*/
 
 	return 0;
 }
@@ -1973,7 +1945,8 @@ static void GPU_RenderLine_layer(volatile NDS_Screen * screen, u16 l)
 	gpu->currentFadeOutColors = &fadeOutColors[gpu->BLDY_EVY][0];
 
 	//u16 backdrop_color = T1ReadWord(MMU.ARM9_VMEM, gpu->core * 0x400) & 0x7FFF;
-	memset(gpu->currDst, 0, 512);
+	u8* dst_back = gpu->currDst;
+	u8* dst_front = (u8*)(GPU_Screen_extra) + psp_addrScreenLine[l] + sub_index;
 
 	//we need to write backdrop colors in the same way as we do BG pixels in order to do correct window processing
 	//this is currently eating up 2fps or so. it is a reasonable candidate for optimization. 
@@ -2062,15 +2035,30 @@ PLAIN_CLEAR:
 	for(int j=0;j<8;j++)
 		gpu->blend2[j] = (gpu->BLDCNT & (0x100 << j))!=0;
 
-	// paint lower priorities first
-	// then higher priorities on top
+	int priority3D = 4;
+	if (gpu->core == GPU_MAIN && dispCnt->BG0_3D) {
+		priority3D = gpu->dispx_st->dispx_BGxCNT[0].bits.Priority;
+	}
+
 	for(int prio=NB_PRIORITIES; prio > 0; )
 	{
 		prio--;
 		item = &(gpu->itemsForPriority[prio]);
-		// render BGs
+
+		// ----------------------------------------------------
+		// 1. RENDER DEI BACKGROUND
+		// ----------------------------------------------------
 		if (BG_enabled)
 		{
+			// SWITCH PER I BG: A parità di priorità (>=), il 3D (BG0) vince.
+			// Quindi gli altri BG vanno nel Back Buffer (Dietro al 3D).
+			if (gpu->core == GPU_MAIN && dispCnt->BG0_3D) {
+				if (prio >= priority3D) gpu->currDst = dst_back;
+				else gpu->currDst = dst_front;
+			} else {
+				gpu->currDst = dst_back;
+			}
+
 			for (int i=0; i < item->nbBGs; i++) 
 			{
 				const GPULayerID layerID = (GPULayerID)item->BGs[i];
@@ -2079,30 +2067,38 @@ PLAIN_CLEAR:
 					gpu->currBgNum = (u8)layerID;
 					gpu->blend1 = (gpu->BLDCNT & (1 << gpu->currBgNum))!=0;
 
-						if (gpu->core == GPU_MAIN)
+					if (gpu->core == GPU_MAIN)
+					{
+						if (layerID == GPULayerID_BG0 && dispCnt->BG0_3D)
 						{
-							//printf("BG%d 3D %d\n", layerID, dispCnt->BG0_3D);
-							//bg0_3D_drawn = dispCnt->BG0_3D  && gpu->LayersEnable[GPULayerID_BG1] && gpu->LayersEnable[GPULayerID_BG2] && !gpu->LayersEnable[GPULayerID_BG3];
-							if (layerID == GPULayerID_BG0 && dispCnt->BG0_3D)
-							{
-								gpu->currBgNum = GPULayerID_BG0;
-								continue;
-							}
+							gpu->currBgNum = GPULayerID_BG0;
+							continue;
 						}
+					}
 					
 					gpu->modeRender<false>(layerID);
-				} //layer enabled
+				}
 			}
 		}
 
-		// render sprite Pixels
+		// ----------------------------------------------------
+		// 2. RENDER DEGLI SPRITE (OBJ)
+		// ----------------------------------------------------
 		if (gpu->LayersEnable[GPULayerID_OBJ] && (item->nbPixelsX > 0) )
 		{
+			// SWITCH PER GLI SPRITE: A parità di priorità (>), gli Sprite vincono sul 3D!
+			// Quindi gli sprite vanno nel Front Buffer (Davanti al 3D). 
+			// Solo se la priorità è STRETTAMENTE MAGGIORE vanno dietro.
+			if (gpu->core == GPU_MAIN && dispCnt->BG0_3D) {
+				if (prio > priority3D) gpu->currDst = dst_back;
+				else gpu->currDst = dst_front;
+			} else {
+				gpu->currDst = dst_back;
+			}
+
 			gpu->currBgNum = GPULayerID_OBJ;
 			gpu->blend1 = (gpu->BLDCNT & (1 << gpu->currBgNum))!=0;
-
-			//drawSprite(1, 1, 1, item->nbPixelsX, spr);
-
+			
 			const bool WINDOW = gpu->setFinalColorSpr_funcNum >= 4;
 			bool windowDraw = WINDOW;
 			bool windowEffectSatisfied = WINDOW;
@@ -2121,12 +2117,14 @@ PLAIN_CLEAR:
 						setFinalColorSpr<true>(gpu, gpu->currDst, *(((u16*)spr) + (u32)(srcX)), sprAlpha[srcX], sprType[srcX], srcX);
 						continue;
 					}
-
 				}
 				
 				setFinalColorSpr<false>(gpu, gpu->currDst, *(((u16*)spr) + (u32)(srcX)), sprAlpha[srcX], sprType[srcX], srcX);
 			}
 		}
+
+		// Ripristina sempre al back buffer per le prossime iterazioni
+		gpu->currDst = dst_back;
 	}
 }
 
@@ -2319,7 +2317,7 @@ template<bool SKIP> static void GPU_RenderLine_DispCapture(u16 l)
 	}
 }
 
-int sub_index = 0;
+
 
 static INLINE void GPU_RenderLine_MasterBrightness(GPU * gpu, u16 l)
 {
@@ -2509,6 +2507,8 @@ void GPU_RenderLine(volatile NDS_Screen * screen, u16 l, bool skip)
 		}
 		return;
 	}
+
+
 
 	// skip some work if master brightness makes the screen completely white or completely black
 	if(gpu->MasterBrightFactor >= 16 && (gpu->MasterBrightMode == 1 || gpu->MasterBrightMode == 2))

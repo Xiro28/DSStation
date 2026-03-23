@@ -61,6 +61,7 @@ void* depthBuffer  = (void*)VRAM_DEPTH_OFFSET;
 
 
 u8* DISP_POINTER = (u8*)(0x44000000u + 0x100000u); 
+u8* DISP_POINTER_FRONT = (u8*)(0x44000000u + 0x100000u + 512 * 192 * 2);
 
 intraFont* Font;
 intraFont* RomFont;
@@ -306,6 +307,32 @@ static inline u16 getNDSBackdropColor(int core)
 
 static bool emuFrameStarted = false;
 
+// Funzione reale per disegnare il buffer 2D
+struct DispVertexTextured {
+    unsigned short u, v; 
+    short x, y, z;       
+};
+
+static void Draw2DTexture(volatile u8* texture_buffer, int screen_x, int screen_y, int screen_w, int screen_h, int u_start = -1) {
+    sceGuEnable(GU_TEXTURE_2D);
+	sceGuTexMode(GU_PSM_5551, 0, 0, 0); 
+    
+    sceGuTexImage(0, 512, 256, 512, (void*)texture_buffer); 
+    
+    sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA); 
+    
+    sceGuEnable(GU_ALPHA_TEST);  // Abilita test alpha per trasparenza HUD
+	sceGuAlphaFunc(GU_GREATER, 0, 0xFF);
+
+	if (u_start == -1){
+		sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_slices_left  * 2, NULL, slices_left);
+		sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_slices_right * 2, NULL, slices_right);
+	}else{
+		sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_slices_left  * 2, NULL, slices_left);
+		sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_slices_right * 2, NULL, slices_right);
+	}
+}
+
 void EMU_SCREEN(bool skip2d, bool skip3d)
 {
     const bool do_3d = (((REG_DISPx*)&MMU.ARM9_REG[0])->dispx_DISPCNT.bits.BG0_3D)
@@ -339,7 +366,7 @@ void EMU_SCREEN(bool skip2d, bool skip3d)
     sceGuEnable(GU_BLEND);
     sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
 
-    if (do_3d)
+   if (do_3d)
     {
         if (old_color_main != _color_main || old_color_sub != _color_sub) {
             if (_3dOnLeft) {
@@ -354,38 +381,34 @@ void EMU_SCREEN(bool skip2d, bool skip3d)
             sceKernelDcacheWritebackRange(bck_gpuvtx, 4 * sizeof(DispVertexColoredNT));
         }
 
+        int v_idx = 0;
+        int screen_x = bck_gpuvtx[v_idx].x;
+        int screen_y = bck_gpuvtx[v_idx].y;
+        int screen_w = bck_gpuvtx[v_idx + 1].x - screen_x;
+        int screen_h = bck_gpuvtx[v_idx + 1].y - screen_y;
+
+        int u_start = _3dOnLeft ? 0 : 256;
+
+        // 0. Sfondo tinta unita
         sceGuDisable(GU_TEXTURE_2D);
         sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS_COLOR_NT, 4, NULL, bck_gpuvtx);
 
-        if (!my_config._3d_always_on_top) {
-            sceGuEnable(GU_DEPTH_TEST);
-            sceGuDepthMask(GU_FALSE);
-            gpu3D->NDS_3D_Render();
-            sceGuDisable(GU_DEPTH_TEST);
-            sceGuDepthMask(GU_TRUE);
-        }
 
-        // Sub screen: opaque blit
-        sceGuEnable(GU_TEXTURE_2D);
-        sceGuTexMode(GU_PSM_5551, 0, 0, 0);
-        sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGB);
-        sceGuTexImage(0, 512, 256, 512, DISP_POINTER);
-        sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_2d * 2, NULL, slices_2d);
+        // 1. BACK LAYER (Sfondo 2D dietro al 3D)
+        sceGuDisable(GU_DEPTH_TEST); // Forza la scrittura sotto il 3D
+        sceGuEnable(GU_TEXTURE_2D); 
+        sceGuDisable(GU_BLEND);     
+        Draw2DTexture(DISP_POINTER, screen_x, screen_y, screen_w, screen_h); 
 
-        // 3D screen: alpha-tested overlay
-        sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
-        sceGuEnable(GU_ALPHA_TEST);
-        sceGuAlphaFunc(GU_GREATER, 0, 0xFF);
-        sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_3d * 2, NULL, slices_3d);
-        sceGuDisable(GU_ALPHA_TEST);
+        // 2. MIDDLE LAYER (Hardware 3D)
+        sceGuEnable(GU_DEPTH_TEST);  // Riattiva la profondità per i modelli
+        sceGuDepthMask(GU_TRUE); 
+        gpu3D->NDS_3D_Render();
 
-        if (my_config._3d_always_on_top) {
-            sceGuEnable(GU_DEPTH_TEST);
-            sceGuDepthMask(GU_FALSE);
-            gpu3D->NDS_3D_Render();
-            sceGuDisable(GU_DEPTH_TEST);
-            sceGuDepthMask(GU_TRUE);
-        }
+        // 3. FRONT LAYER (HUD, Sprite 2D davanti al 3D)
+        sceGuDisable(GU_DEPTH_TEST); // Non fa tagliare l'HUD dal 3D
+		sceGuDisable(GU_BLEND);  
+        Draw2DTexture(DISP_POINTER_FRONT, screen_x, screen_y, screen_w, screen_h, u_start);
     }
     else
     {
@@ -393,7 +416,7 @@ void EMU_SCREEN(bool skip2d, bool skip3d)
         sceGuDepthMask(GU_TRUE);
         sceGuEnable(GU_TEXTURE_2D);
         sceGuTexMode(GU_PSM_5551, 0, 0, 0);
-        sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGB);
+        sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
         sceGuTexImage(0, 512, 256, 512, DISP_POINTER);
         sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_slices_left  * 2, NULL, slices_left);
         sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_slices_right * 2, NULL, slices_right);

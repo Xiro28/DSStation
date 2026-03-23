@@ -2434,13 +2434,9 @@ static inline bool gfx3d_zsort_compare(int num1, int num2)
 {
 	const POLY& poly1 = polylist->list[num1];
 	const POLY& poly2 = polylist->list[num2];
-
-	/*if (poly1.maxz != poly2.maxz)
-		return poly1.maxz < poly2.maxz;
-	if (poly1.minz != poly2.minz)
-	*/	
-	return poly1.minz <= poly2.minz;
-	//return num1 < num2;
+	
+	// Disegna PRIMA i poligoni più lontani (Back-to-Front)
+	return poly1.maxz > poly2.maxz;
 }
 
 static bool gfx3d_ysort_compare(int num1, int num2)
@@ -2500,54 +2496,44 @@ static void gfx3d_doFlush()
 
 
 for (size_t i = 0; i < polycount; i++)
-{
-    POLY &poly = polylist->list[i];
-    
-    float verty = vertlist->list[poly.vertIndexes[0]].y;
-    float vertw = (vertlist->list[poly.vertIndexes[0]].w != 0.0f) ? vertlist->list[poly.vertIndexes[0]].w : 0.00000001f;
-    verty = 1.0f-(verty+vertw)/(2*vertw);
-    poly.miny = poly.maxy = verty;
-
-    // AGGIUNTO: calcola minz/maxz
-    float vertz = vertlist->list[poly.vertIndexes[0]].z;
-    float nz = (vertz + vertw) / (2.0f * vertw);
-    poly.minz = poly.maxz = nz;
-
-    for (size_t j = 1; j < poly.type; j++)
-    {
-        verty = vertlist->list[poly.vertIndexes[j]].y;
-        vertw = (vertlist->list[poly.vertIndexes[j]].w != 0.0f) ? vertlist->list[poly.vertIndexes[j]].w : 0.00000001f;
-        verty = 1.0f-(verty+vertw)/(2*vertw);
-        poly.miny = min(poly.miny, verty);
-        poly.maxy = max(poly.maxy, verty);
-
-        // AGGIUNTO
-        vertz = vertlist->list[poly.vertIndexes[j]].z;
-        nz = (vertz + vertw) / (2.0f * vertw);
-        poly.minz = min(poly.minz, nz);
-        poly.maxz = max(poly.maxz, nz);
-    }
-}
-
+	{
+		POLY &poly = polylist->list[i];
+		float furthest_z = 0.0f;
+		
+		for (size_t j = 0; j < poly.type; j++) {
+			float vw = vertlist->list[poly.vertIndexes[j]].w;
+			float vz = vertlist->list[poly.vertIndexes[j]].z;
+			
+			float current_z = 0.0f;
+			if (gfx3d.state.wbuffer) {
+				current_z = vw; // Usa W-buffer se richiesto dal gioco
+			} else {
+				current_z = (vw != 0.0f) ? (vz / vw) : 0.0f;
+			}
+			
+			// Trova il punto più profondo (lontano) del poligono
+			if (current_z > furthest_z) {
+				furthest_z = current_z;
+			}
+		}
+		
+		poly.maxz = furthest_z;
+	}
 
 	size_t ctr = 0;
-for (size_t i = 0; i < polycount; i++)
-    gfx3d.indexlist.list[ctr++] = i;
+	for (size_t i = 0; i < polycount; i++)
+		gfx3d.indexlist.list[ctr++] = i;
 
-// Sorta TUTTO per Y insieme (opachi e traslucenti insieme)
-if (my_config.sort_3d)
-{
-    std::stable_sort(gfx3d.indexlist.list,
-                     gfx3d.indexlist.list + polycount,
-                     gfx3d_ysort_compare);
-}
-
-	
-	//gfx3d.processed_polylist = gfx3d.polylist;
-	//gfx3d.processed_vertlist = gfx3d.vertlist;
-	//gfx3d.processed_indexlist = gfx3d.indexlist; 
-	
-
+	// Eseguiamo un Painter's Algorithm per tutta la scena
+	//if (my_config.sort_3d)
+	{
+		std::stable_sort(gfx3d.indexlist.list,
+						 gfx3d.indexlist.list + polycount,
+						 [](int num1, int num2) {
+							 // Back-to-Front: il poligono con il vertice più lontano viene disegnato per primo
+							 return polylist->list[num1].maxz > polylist->list[num2].maxz;
+						 });
+	}
 /*
 	if (!gfx3d.state.sortmode)
 	{
