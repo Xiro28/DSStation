@@ -2076,13 +2076,16 @@ static void writereg_POWCNT1(const int size, const u32 adr, const u32 val) {
 
 static INLINE void MMU_IPCSync(u8 proc, u32 val)
 {
-	//INFO("IPC%s sync 0x%04X (0x%02X|%02X)\n", proc?"7":"9", val, val >> 8, val & 0xFF);
+	printf("[HLE] MMU_IPCSync: proc=%d val=0x%04X bit13=%d bit14=%d data=%d\n",
+		proc, val, (val >> 13) & 1, (val >> 14) & 1, (val >> 8) & 0xF);
+
 	IPCSync7 &= 0x4F00;
 	IPCSync7 |= ((val & 0x0F00) >> 8);
 	IPCSync9 &= 0xB0FF;
 	IPCSync9 |= (val & 0x4F00);
 
-	HLE_IPCSYNC();
+	//if (val & (1 << 13))  // solo se il mittente richiede IRQ all'altra CPU
+		HLE_IPCSYNC();
 
 	NDS_Reschedule();
 }
@@ -2567,8 +2570,8 @@ void TransferMemory(u32& saddr, u32& daddr, int todo, const T srcinc, const T ds
     T* src_ptr = GetMemPtr<T, PROCNUM>(saddr & ~(SZ - 1), srcinc);
     T* dst_ptr = GetMemPtr<T, PROCNUM>(daddr & ~(SZ - 1), dstinc);
 
-	const T incr_src = (srcinc == 0) ? 0 : ((srcinc > 0) ? 1 : -1);
-	const T incr_dst = (dstinc == 0) ? 0 : ((dstinc > 0) ? 1 : -1);
+	const T incr_src = (srcinc == 0) ? 0 : ((((int32_t)srcinc) > 0) ? 1 : -1);
+	const T incr_dst = (dstinc == 0) ? 0 : ((((int32_t)dstinc) > 0) ? 1 : -1);
 
     const bool fallback = (src_ptr == nullptr && dst_ptr == nullptr);
 

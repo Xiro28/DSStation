@@ -234,7 +234,7 @@ void SetupTexture(POLY& thePoly)
         if (polyAttr.decalMode) {
             sceGuDepthFunc(GU_LEQUAL); // 1 = Sovrascrive i poligoni alla stessa profondità
         } else {
-            sceGuDepthFunc(GU_LESS);   // 0 = Rifiuta a parità di Z (Il background fallisce e resta DIETRO i bottoni!)
+            //sceGuDepthFunc(GU_LESS);   // 0 = Rifiuta a parità di Z (Il background fallisce e resta DIETRO i bottoni!)
         }
         sceGuEnable(GU_DEPTH_TEST);
     } else {
@@ -306,6 +306,7 @@ FORCEINLINE void mainLoop()
 {
     const size_t polyCount = engine->polylist->count;
     if (polyCount == 0) return;
+	
 
     const bool _3dOnTop   = (MainScreen.offset == 0);
     const float screenX_off = _3dOnTop ? 0.0f : 240.0f;
@@ -317,7 +318,7 @@ FORCEINLINE void mainLoop()
     
     // Puliamo lo Z-Buffer al valore "LONTANO"
     sceGuClearDepth(65535);         
-    sceGuClear(GU_DEPTH_BUFFER_BIT);
+    sceGuClear(GU_DEPTH_BUFFER_BIT | GU_STENCIL_BUFFER_BIT);
 
 
     // FIX B: scissor ai pixel PSP corretti per questo schermo
@@ -340,9 +341,9 @@ FORCEINLINE void mainLoop()
 
     auto flushBatch = [&]() {
         if (batching && batched_draws > 0) {
-            sceKernelDcacheWritebackRange(
+            /*sceKernelDcacheWritebackRange(
                 &vertices[batch_start],
-                batched_draws * sizeof(Vertex));
+                batched_draws * sizeof(Vertex));*/
             sceGuDrawArray(
                 lastPolyPrimitive,
                 GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D,

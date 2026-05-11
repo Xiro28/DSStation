@@ -238,7 +238,7 @@ void Menu(){
 }
 
 extern bool ARM7_SKIP_HACK;
-
+extern armcpu_t NDS_ARM9;
 void
 //process_ctrls_event( SDL_Event& event,
 process_ctrls_event(u16 &keypad)
@@ -247,6 +247,8 @@ process_ctrls_event(u16 &keypad)
 	  sceCtrlSetSamplingCycle(0);
 	  sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
 	  sceCtrlPeekBufferPositive(&pad, 1); 
+
+	  //printf("ARM9 PC: %08x, CPSR: %08x\n", NDS_ARM9.R[15], NDS_ARM9.CPSR);
 
 	  mouse.click = FALSE;
 

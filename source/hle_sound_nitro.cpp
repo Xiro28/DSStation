@@ -380,6 +380,7 @@ void SNDi_InitSharedWork(struct SNDSharedWork *sw) {
     _MMU_write32<ARMCPU_ARM7>((u32)&sw->playerStatus, 0);
     _MMU_write16<ARMCPU_ARM7>((u32)&sw->channelStatus, 0);
     _MMU_write16<ARMCPU_ARM7>((u32)&sw->captureStatus, 0);
+    
 
     for (s32 i = 0; i < 16; i++) {
         _MMU_write32<ARMCPU_ARM7>((u32)&sw->players[i].tickCounter, 0);
@@ -524,7 +525,7 @@ void readDriverInfo(u32 driverInfoAddr)
     for (int i = 0; i < 16; i++)
     {
         u32 val = SPU_ReadWord(0x04000400 + (i*16));
-        _MMU_ARM7_write32(driverInfoAddr + 0x1180 + (i * 4), SPU_ReadByte(0x403 + (i*0xf)));
+        _MMU_ARM7_write32(driverInfoAddr + 0x1180 + (i * 4), SPU_ReadByte(0x04000403 + (i*0xf)));
     }
 
     _MMU_ARM7_write32(driverInfoAddr + 0x11C4, sLockedChannelMask);
@@ -959,7 +960,7 @@ void FinishSequenceTrack(Sequence* seq, int id)
     Track* track = GetSequenceTrack(seq, id);
     if (!track) return;
 
-    FinishTrack(track, seq, -1);
+    FinishTrack(track, seq, 127);
     UnlinkTrackChannels(track);
 
     track->StatusFlags &= ~(1<<0);
@@ -1159,7 +1160,7 @@ void ProcessCommands()
                             Track* track = GetSequenceTrack(seq, i);
                             if (!track) continue;
                         
-                            FinishTrack(track, seq, -1);
+                            FinishTrack(track, seq, 127);
                             UnlinkTrackChannels(track);
                         }
                     }
@@ -1575,9 +1576,9 @@ void ProcessCommands()
                 u32 weak = args[1];
 
                 if (weak & 1){
-                    sWeakLockedChannelMask &= !chnmask;
+                    sWeakLockedChannelMask &=  ~chnmask;
                 }else{
-                    sLockedChannelMask &= !chnmask;
+                    sLockedChannelMask &=  ~chnmask;
                 }
 
             }
@@ -1610,11 +1611,12 @@ void ProcessCommands()
                 }
 
                 //ReportHardwareStatus();
+                break;
             }
 
             case 0x1D:
                 SharedMem = args[0];
-                SNDi_InitSharedWork((SNDSharedWork*)SharedMem);
+                //SNDi_InitSharedWork((SNDSharedWork*)SharedMem);
                 //SharedMemPtr = (SNDSharedWork*)&MMU.MAIN_MEM[SharedMem];
                 break;
 
@@ -2226,7 +2228,7 @@ int UpdateTrack(Track* track, Sequence* seq, int id, bool process)
                             if (!thetrack) break;
                             if (thetrack == track) break;
 
-                            FinishTrack(thetrack, seq, -1);
+                            FinishTrack(thetrack, seq, 127);
                             UnlinkTrackChannels(thetrack);
 
                             thetrack->NoteBuffer = track->NoteBuffer;
@@ -2389,7 +2391,7 @@ int UpdateTrack(Track* track, Sequence* seq, int id, bool process)
                     case 0xC8: // tie
                         track->StatusFlags &= ~(1<<3);
                         track->StatusFlags |= ((param & 0x1) << 3);
-                        FinishTrack(track, seq, -1);
+                        FinishTrack(track, seq, 127);
                         UnlinkTrackChannels(track);
                         break;
                     case 0xC9: // portamento control
@@ -2397,7 +2399,7 @@ int UpdateTrack(Track* track, Sequence* seq, int id, bool process)
                         track->StatusFlags |= (1<<5);
                         if (Version == 1)
                         {
-                            FinishTrack(track, seq, -1);
+                            FinishTrack(track, seq, 127);
                             UnlinkTrackChannels(track);
                         }
                         break;
@@ -2418,7 +2420,7 @@ int UpdateTrack(Track* track, Sequence* seq, int id, bool process)
                         track->StatusFlags |= ((param & 0x1) << 5);
                         if (Version == 1)
                         {
-                            FinishTrack(track, seq, -1);
+                            FinishTrack(track, seq, 127);
                             UnlinkTrackChannels(track);
                         }
                         break;

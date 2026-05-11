@@ -962,7 +962,7 @@ void GameInfo::closeROM()
 	lastReadPos = 0xFFFFFFFF;
 }
 
-#define PROFILE
+//#define PROFILE
 
 u32 GameInfo::readROM(u32 pos, bool store)
 {
@@ -1011,8 +1011,11 @@ u32 GameInfo::readROM(u32 pos, bool store)
 
 		data = LE_TO_LOCAL_32(data) & ~pad | pad;
 
-		cached_rom[pos] = data;
-		cache_miss++;
+		if (store)
+		{
+			cached_rom[pos] = data;
+			cache_miss++;
+		}
 	}
 	else
 		cache_hit++;
@@ -1613,16 +1616,53 @@ struct Sequencer
     };
 
     struct EventNode {
-        s32 next_time; // 4 byte
-        s32 next;      // 4 byte
-        s32 prev;      // 4 byte
-        s32 pending;   // 4 byte (usiamo s32 invece di bool per allineamento perfetto)
+        u64 next_time; // 8 byte (Timestamp assoluto)
+        s16 next;      // 2 byte
+        s16 prev;      // 2 byte
+        s32 pending;   // 4 byte
     };
 
     // Allocazione statica contigua
     EventNode nodes[EVENT_COUNT];
     EventHandler handlers[EVENT_COUNT];
     s32 head;
+
+	u64 computeNext(EventID id)
+    {
+        return handlers[id].computeNext(handlers[id].instance);
+    }
+
+    template <EventID id>
+    u64 computeNext()
+    {
+        return handlers[id].computeNext(handlers[id].instance);
+    }
+
+    void resolve_pendings() {
+        for (int i = 0; i < EVENT_COUNT; ++i) {
+            EventID eventId = static_cast<EventID>(i);
+            if (nodes[i].pending) {
+                nodes[i].pending = 0;
+                
+                removeFromList(i); 
+
+                if (isEnabled(eventId)) {
+                    // Ricalcola il prossimo tempo in assoluto
+                    nodes[i].next_time = computeNext(eventId); 
+                    insertSorted(eventId);
+                }
+            }
+        }
+    }
+
+    u64 popNext(EventID &outEvent) {
+        s32 currentHead = head;
+        if (currentHead == -1) {
+            return kNever; 
+        }
+        outEvent = static_cast<EventID>(currentHead);
+        return nodes[currentHead].next_time;
+    }
 
 	void registerEvent(int id, void* instance, CheckFunc check, NextFunc next) {
         handlers[id].instance = instance;
@@ -1649,7 +1689,7 @@ struct Sequencer
     }
 
     void insertSorted(int idx) {
-        s32 time = nodes[idx].next_time;
+        u64 time = nodes[idx].next_time; // CORREZIONE: u64, NON s32!
 
         // Fast path: Inserimento in testa
         if (head == -1 || time < nodes[head].next_time) {
@@ -1660,7 +1700,7 @@ struct Sequencer
             return;
         }
 
-        // Linear search (Cache friendly grazie al layout EventNode)
+        // Linear search
         s32 curr = head;
         while (true) {
             s32 nxt = nodes[curr].next;
@@ -1681,17 +1721,6 @@ struct Sequencer
 		return handlers[id].isEnabled(handlers[id].instance);
 	}
 
-	template <EventID id>
-	s32 computeNext()
-	{
-		return handlers[id].computeNext(handlers[id].instance) - nds_timer;
-	}
-
-	s32 computeNext(EventID id)
-	{
-		return handlers[id].computeNext(handlers[id].instance) - nds_timer;
-	}
-
     void reSchedule() {
         head = -1;
         for (int i = 0; i < EVENT_COUNT; ++i) {
@@ -1709,20 +1738,6 @@ struct Sequencer
             }
         }
     }
-
-	void resolve_pendings() {
-        for (int i = 0; i < EVENT_COUNT; ++i) {
-			EventID eventId = static_cast<EventID>(i);
-            // Check veloce su intero (pending) prima di chiamare la funzione virtuale/pointer
-            if (nodes[i].pending) {
-                if (isEnabled(eventId)) {
-                    nodes[i].pending = 0;
-                    insertSorted(eventId);
-                }
-            }
-        }
-    }
-
 
 	void updateEventCycle(EventID id, u32 cycles) {
         int idx = static_cast<int>(id);
@@ -1752,17 +1767,6 @@ struct Sequencer
         } else {
             nodes[id].pending = 1;
         }
-    }
-
-
-    s32 popNext(EventID &outEvent) {
-		s32 currentHead = head;
-        if (currentHead == -1) {
-            // Gestione lista vuota
-            return kNever; 
-        }
-
-        return nodes[currentHead].next_time;
     }
 
 	Sequencer() : head(-1) {
@@ -1932,13 +1936,13 @@ void NDS_RescheduleTimers()
 #undef check
 
 	if (sequencer.timer_0_0.enabled)
-		sequencer.updateEvent<TIMER_00, false>();
+		sequencer.updateEvent<TIMER_00, true>();
 	if (sequencer.timer_0_1.enabled)
-		sequencer.updateEvent<TIMER_01, false>();
+		sequencer.updateEvent<TIMER_01, true>();
 	if (sequencer.timer_0_2.enabled)
-		sequencer.updateEvent<TIMER_02, false>();
+		sequencer.updateEvent<TIMER_02, true>();
 	if (sequencer.timer_0_3.enabled)
-		sequencer.updateEvent<TIMER_03, false>();
+		sequencer.updateEvent<TIMER_03, true>();
 
 	/*if (sequencer.timer_1_0.enabled)
 		sequencer.updateEvent<TIMER_10, false>();
@@ -2021,10 +2025,10 @@ void Sequencer::init()
 	dma_1_3.controller = &MMU_new.dma[1][3];
 
 	hle_audio.enabled = true;
-	hle_audio.timestamp = kAudioCycles;
+	hle_audio.timestamp = 0;
 
-	wifi_hle.enabled = false;
-	wifi_hle.timestamp = kWifiCycles;
+	wifi_hle.enabled = true;
+	wifi_hle.timestamp = 0;
 
 	alarmHLE.enabled = false;
 	alarmHLE.timestamp = 0;
@@ -2194,11 +2198,12 @@ static void execHardware_hstart()
 	{
 		// when the vcount hits 263 it rolls over to 0
 		nds.hw_status.VCount = 0;
+		
 	}
 	else if (nds.hw_status.VCount == 262)
 	{
 		gfx3d_VBlankEndSignal(frameSkipper.ShouldSkip3D());
-		
+
 		execHardware_hstart_vblankEnd();
 	}
 	else if (nds.hw_status.VCount == 261)
@@ -2209,7 +2214,7 @@ static void execHardware_hstart()
 	{
 		// turn on vblank status bit
 		executeARM7Stuff();
-		
+
 		T1WriteWord(MMU.ARM9_REG, 4, T1ReadWord(MMU.ARM9_REG, 4) | 1);
 		T1WriteWord(MMU.ARM7_REG, 4, T1ReadWord(MMU.ARM7_REG, 4) | 1);
 
@@ -2347,6 +2352,11 @@ void Sequencer::execHardware()
 		sequencer.removeFromList<WIFI_HLE>();
 	}
 
+	if (sequencer.gxfifo.isTriggered())
+    {
+        gfx3d_execute3D();
+    }
+
 	if (hle_audio.isTriggered())
 	{
 		Sound_Nitro::Process(1);
@@ -2354,22 +2364,22 @@ void Sequencer::execHardware()
 		sequencer.updateEvent<HLE_AUDIO, true>();
 	}
 
-#define test(X, Y)                   \
-	if (dma_##X##_##Y.isTriggered()) \
-		dma_##X##_##Y.exec();
-	test(0, 0);
-	test(0, 1);
-	test(0, 2);
-	test(0, 3);
+#define test(X, Y)                                      \
+	if (dma_##X##_##Y.isTriggered()) {                  \
+		dma_##X##_##Y.exec();                           \
+		sequencer.updateEvent<DMA_##X##Y, true>();      \
+	}
+	test(0, 0); test(0, 1); test(0, 2); test(0, 3);
 	// test(1,0); test(1,1); test(1,2); test(1,3);
 #undef test
-#define test(X, Y)                     \
-	if (timer_##X##_##Y.isTriggered()) \
-		timer_##X##_##Y.exec();
-	test(0, 0);
-	test(0, 1);
-	test(0, 2);
-	test(0, 3);
+
+	// Risoluzione aggiornamento Timers
+#define test(X, Y)                                      \
+	if (timer_##X##_##Y.isTriggered()) {                \
+		timer_##X##_##Y.exec();                         \
+		sequencer.updateEvent<TIMER_##X##Y, true>();    \
+	}
+	test(0, 0); test(0, 1); test(0, 2); test(0, 3);
 	// test(1,0); test(1,1); test(1,2); test(1,3);
 #undef test
 }
@@ -2431,135 +2441,51 @@ u64 old_next = 0;
 
 EventID nextEvent;
 
-#if 0
 void exec_cpu()
 {
-	NDS_ReschedulePtr = 0;
+    NDS_ReschedulePtr = 0;
 
-	s32 s32next = sequencer.popNext(nextEvent);
+    u64 next_abs = sequencer.popNext(nextEvent);
 
-	u64 nds_timer_base = nds_timer;
-	arm9 = static_cast<s32>(nds_arm9_timer - nds_timer);
-	arm7 = static_cast<s32>(nds_arm7_timer - nds_timer);
-	
-	// Always work in signed time
-	s32 armtime = std::min(arm9, arm7);
-
-	// Pick the CPU whose next event is earliest
-	
-	
-	/*while (armtime < s32next && NDS_ReschedulePtr == 0 )
-	{
-
-		const bool runArm9 = (arm9 <= arm7);
-		
-		if (runArm9)
-		{
-			if (!(NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ) && !nds.freezeBus)
-			{
-				arm9 += armcpu_exec<ARMCPU_ARM9, false>();  // JIT=true per your new path
-			}
-			else
-			{
-				const s32 prev = arm9;
-				arm9 = std::min(s32next, arm9 + kIrqWait);
-				nds.idleCycles[0] += (arm9 - prev);
-	
-				if (gxFIFO.size < 255)
-					nds.freezeBus &= ~1;
-			}
-		}
-		else
-		{
-			const bool cpufreeze = !!(NDS_ARM7.freeze & (CPU_FREEZE_WAIT_IRQ | CPU_FREEZE_OVERCLOCK_HACK));
-	
-			if (!cpufreeze && !nds.freezeBus)
-			{
-				// ARM7 runs at half speed → <<1 after armcpu_exec (like old code)
-			 	arm7 += (armcpu_exec<ARMCPU_ARM7>() << 1);
-			}
-			else
-			{
-				const s32 prev = arm7;
-				arm7 = std::min(s32next, arm7 + kIrqWait);
-				nds.idleCycles[1] += (arm7 - prev);
-			}
-		}
-	
-		// Advance global time by the earliest CPU time
-		armtime = std::min(arm9, arm7);
-		nds_timer = nds_timer_base + armtime;
-
-	}*/
-	
-	if (sequencer.gxfifo.isTriggered())
-	{
-		gfx3d_execute3D();
+	if (next_abs == kNever)
+	{		// if there are no events scheduled, just run the arm9 for a while and then
+		printf("Warning: No events scheduled, running ARM9 for a while. This should not happen, but if it does, it means that the emulator is in a state where nothing is scheduled to happen. This can cause timing issues and should be investigated.\n");
 	}
 
-	/*printf("IME: %s, IF: %08X, IE: %08X\n",
-		MMU.reg_IME[0] ? "enabled" : "disabled",
-		MMU.gen_IF<0>(),
-		MMU.reg_IE[0]);
-*/
-	/*printf("Status: %s %d cycles, %d idle cycles. Bus %s\n",
-	NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ ? "waiting for IRQ" : "idle",
-	arm9, nds.idleCycles[0], nds.freezeBus ? "frozen" : "unfrozen");*/
+    s32next = (s32)(next_abs - nds_timer);
 
-	nds_timer = nds_timer_base + armtime;
+    u64 nds_timer_base = nds_timer;
+    arm9 = (s32)(nds_arm9_timer - nds_timer);
 
-	nds_arm9_timer = nds_timer_base + arm9;
-	nds_arm9_timer = nds_timer_base + arm7;
-	//nds_arm7_timer = nds_timer_base + arm7;
-
-	
-	sequencer.updateEventCycle(nextEvent, armtime);
-}
-#endif
-
-void exec_cpu()
-{
-	NDS_ReschedulePtr = 0;
-
-	s32next = sequencer.popNext(nextEvent);
-
-	u64 nds_timer_base = nds_timer;
-	arm9 = (s32)(nds_arm9_timer - nds_timer);
-	
-	while (arm9 < s32next && NDS_ReschedulePtr == 0)
+	if (arm9 >= s32next)
 	{
-		arm9 += armcpu_exec<ARMCPU_ARM9, true>();  // JIT=true per your new path
-		nds_timer = nds_timer_base + arm9;
-
-		if ((NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ) || nds.freezeBus)
-		{
-			nds.idleCycles[0] += (s32next - arm9);
-			arm9 = s32next; // Jump directly to the next event // std::min(s32next, arm9 + kIrqWait);
-
-			if (nds.freezeBus && gxFIFO.size < 255)
-				nds.freezeBus &= ~1;
-
-			break;
-		}
+		printf("Warning: Next event is scheduled for %lld, but ARM9 is not scheduled to run until %lld. This should not happen, but if it does, it means that some event scheduled another event for the same time or an earlier time. This can cause timing issues and should be investigated.\n", nds_timer_base + s32next, nds_timer_base + arm9);
 	}
+    
+    while (arm9 < s32next && NDS_ReschedulePtr == 0)
+    {
+        arm9 += armcpu_exec<ARMCPU_ARM9, true>(); 
+        nds_timer = nds_timer_base + arm9;
 
-	nds_timer = nds_timer_base + arm9;
+        if ((NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ) || nds.freezeBus)
+        {
+            nds.idleCycles[0] += (s32next - arm9);
+            arm9 = s32next;
 
-	/*printf("Status: %s %d cycles, %d idle cycles. Bus %s\n",
-	NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ ? "waiting for IRQ" : "idle",
-	arm9, nds.idleCycles[0], nds.freezeBus ? "frozen" : "unfrozen");*/
-	
-	if (sequencer.gxfifo.isTriggered())
-	{
-		gfx3d_execute3D();
-	}
+            if (nds.freezeBus && gxFIFO.size < 255)
+                nds.freezeBus &= ~1;
+
+            break;
+        }
+    }
+
+    nds_timer = nds_timer_base + arm9;
 
 
-	nds_arm9_timer = nds_timer_base + arm9;
-	nds_arm7_timer = nds_timer_base + (arm9 >> 1);
+    nds_arm9_timer = nds_timer_base + arm9;
+    
+    nds_arm7_timer += (arm9 >> 1); 
 
-	
-	sequencer.updateEventCycle(nextEvent, arm9);
 }
 
 // This will be our instruction pointer for the NDS execution loop in asm in order to have a better instruction management.
@@ -2973,6 +2899,11 @@ bool NDS_FakeBoot()
 	_MMU_write32<ARMCPU_ARM7>(0x027FF800, gameInfo.chipID); // 1st chipId
 	_MMU_write32<ARMCPU_ARM7>(0x027FF804, gameInfo.chipID); // 2nd (secure) chipId
 	_MMU_write32<ARMCPU_ARM7>(0x027FFC00, gameInfo.chipID); // 3rd (secure) chipId
+
+	// HLE: pre-setta il flag ARM7-ready al posto del handshake IPCSYNC
+	// ARM9 controlla 0x027FFF8C per sapere che tutti i servizi ARM7 sono pronti
+	// (normalmente settato dall'ARM7 BIOS tramite IPCSYNC handshake 0->5->0)
+	//_MMU_write32<ARMCPU_ARM7>(0x027FFF8C, 0x3FFF0);
 
 	// Write the header checksum to memory
 	_MMU_write16<ARMCPU_ARM9>(0x027FF808, gameInfo.header.headerCRC16);

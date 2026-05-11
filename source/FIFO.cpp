@@ -32,8 +32,7 @@
 #include "arm7_hle.h"
 
 
-// ========================================================= IPC FIFO
-FIFO<u32, 16> IPCFIFO9; // FIFO in which the ARM9 writes
+FIFO<u32, 16> IPCFIFO9; 
 FIFO<u32, 16> IPCFIFO7;
 
 #define IPCFIFO_src (proc == ARM9 ? IPCFIFO9 : IPCFIFO7)
@@ -43,47 +42,46 @@ FIFO<u32, 16> IPCFIFO7;
 
 void IPC_FIFOinit(u8 proc)
 {
-	IPCFIFO9.Clear();
+    IPCFIFO9.Clear();
     IPCFIFO7.Clear();
 }
 
 void IPC_FIFOsend(u8 proc, u32 val)
 {
-	if (IPCFIFOCNT_src & IPCFIFOCNT_FIFOENABLE){
+    /*printf("[HLE] IPC_FIFOsend: proc=%d val=0x%08X FIFOEN=%d\n",
+        proc, val, (IPCFIFOCNT_src >> 15) & 1);
+*/
+    if (IPCFIFOCNT_src & IPCFIFOCNT_FIFOENABLE){
 
-		const auto fifo_len = IPCFIFO_src.Level();
+        const auto fifo_len = IPCFIFO_src.Level();
 
-		if (IPCFIFO_src.IsFull()){
-			IPCFIFOCNT_src |= 0x4000;
-			return;
-		}else
-		{
-			IPCFIFO_src.Write(val);
+        if (IPCFIFO_src.IsFull()){
+            IPCFIFOCNT_src |= 0x4000; 
+            return;
+        }else
+        {
+            IPCFIFO_src.Write(val);
 
-			if (fifo_len == 0) {
-				IPCFIFOCNT_src &= ~IPCFIFOCNT_SENDEMPTY;
-			} else if (fifo_len == 15) {
-				IPCFIFOCNT_src |= IPCFIFOCNT_SENDFULL;
-			}
+            if (fifo_len == 0) {
+                if (IPCFIFOCNT_dst & 0x0400)
+                    NDS_makeIrq(proc^1, IRQ_BIT_IPCFIFO_RECVNONEMPTY);
+            }
 
-			if (IPCFIFOCNT_dst & 0x0400)
-				NDS_makeIrq(proc^1, IRQ_BIT_IPCFIFO_RECVNONEMPTY);
-
-			OnIPCRequest();
-		}
-		
-		NDS_Reschedule();
-	}
+            OnIPCRequest(); 
+        }
+        
+        NDS_Reschedule();
+    }
 }
 
 u32 IPC_FIFOrecv(u8 proc)
 {
-	 if (IPCFIFOCNT_src & 0x8000)
+     if (IPCFIFOCNT_src & 0x8000)
         {
             u32 ret;
             if (IPCFIFO_dst.IsEmpty())
             {
-                IPCFIFOCNT_src |= 0x4000;
+                IPCFIFOCNT_src |= 0x4000; 
                 return 0;
             }
             else
@@ -92,8 +90,8 @@ u32 IPC_FIFOrecv(u8 proc)
 
                 if (IPCFIFO_dst.IsEmpty() && (IPCFIFOCNT_dst & 0x0004))
                     NDS_makeIrq(proc^1, IRQ_BIT_IPCFIFO_SENDEMPTY);
-				
-				NDS_Reschedule();
+                
+                NDS_Reschedule();
             }
 
             return ret;
@@ -104,40 +102,40 @@ u32 IPC_FIFOrecv(u8 proc)
 
 void IPC_FIFOcnt(u8 proc, u16 val)
 {
-	
-	if (val & IPCFIFOCNT_SENDCLEAR)
-		IPCFIFO_src.Clear();
-	if ((val & 0x0004) && (!(IPCFIFOCNT_src & 0x0004)) && IPCFIFO_src.IsEmpty())
-		NDS_makeIrq(proc, IRQ_BIT_IPCFIFO_SENDEMPTY);
-	if ((val & 0x0400) && (!(IPCFIFOCNT_src & 0x0400)) && (!IPCFIFO_dst.IsEmpty()))
-		NDS_makeIrq(proc, IRQ_BIT_IPCFIFO_RECVNONEMPTY);
-	if (val & 0x4000)
-		IPCFIFOCNT_src &= ~0x4000;
-	IPCFIFOCNT_src = (val & 0x8404) | (IPCFIFOCNT_src & 0x4000);
+    if (val & IPCFIFOCNT_SENDCLEAR)
+        IPCFIFO_src.Clear();
 
-	NDS_Reschedule();
+    if ((val & 0x0004) && (!(IPCFIFOCNT_src & 0x0004)) && IPCFIFO_src.IsEmpty())
+        NDS_makeIrq(proc, IRQ_BIT_IPCFIFO_SENDEMPTY);
+    if ((val & 0x0400) && (!(IPCFIFOCNT_src & 0x0400)) && (!IPCFIFO_dst.IsEmpty()))
+        NDS_makeIrq(proc, IRQ_BIT_IPCFIFO_RECVNONEMPTY);
+        
+
+    if (val & 0x4000)
+        IPCFIFOCNT_src &= ~0x4000;
+
+    IPCFIFOCNT_src = (val & 0x8404) | (IPCFIFOCNT_src & 0x4000);
+
+    NDS_Reschedule();
 }
 
 u32 IPC_FIFOgetCnt(u8 proc)
 {
-	u16 val = IPCFIFOCNT_src;
+    u16 val = IPCFIFOCNT_src;
 
-	val &= ~IPCFIFOCNT_SENDEMPTY;
-	val &= ~IPCFIFOCNT_SENDFULL;
+    val &= ~IPCFIFOCNT_SENDEMPTY;
+    val &= ~IPCFIFOCNT_SENDFULL;
 
-	val &= ~IPCFIFOCNT_RECVEMPTY;
-	val &= ~IPCFIFOCNT_RECVFULL;
+    val &= ~IPCFIFOCNT_RECVEMPTY;
+    val &= ~IPCFIFOCNT_RECVFULL;
 
+    if (IPCFIFO_src.IsEmpty())          val |= IPCFIFOCNT_SENDEMPTY;
+    else if (IPCFIFO_src.Level() == 16) val |= IPCFIFOCNT_SENDFULL;
 
-	if (IPCFIFO_src.IsEmpty())     val |= IPCFIFOCNT_SENDEMPTY;
-	else if (IPCFIFO_src.Level() == 16) val |= IPCFIFOCNT_SENDFULL;
+    if (IPCFIFO_dst.IsEmpty())          val |= IPCFIFOCNT_RECVEMPTY;
+    else if (IPCFIFO_dst.Level() == 16) val |= IPCFIFOCNT_RECVFULL;
 
-	val |= IPCFIFOCNT_SENDEMPTY;
-
-	if (IPCFIFO_dst.IsEmpty())     val |= IPCFIFOCNT_RECVEMPTY;
-	else if (IPCFIFO_dst.Level() == 16) val |= IPCFIFOCNT_RECVFULL;
-
-	return val;
+    return val;
 }
 
 // ========================================================= GFX FIFO

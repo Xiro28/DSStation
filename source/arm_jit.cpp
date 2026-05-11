@@ -156,6 +156,7 @@ struct Function
 {
    const uint32_t *opcodes;
    size_t opcode_count;
+   s32 cycles;
    const char *name;
    void (*hle_function)(u32); // extern "C" se serve ABI compatibile
 
@@ -163,7 +164,9 @@ struct Function
        const uint32_t *_opcodes,
        size_t _count,
        const char *_name,
-       void (*_hle_function)(u32)) : opcodes(_opcodes), opcode_count(_count), name(_name), hle_function(_hle_function) {}
+       void (*_hle_function)(u32),
+         s32 _cycles = 0
+      ) : opcodes(_opcodes), opcode_count(_count), cycles(_cycles), name(_name), hle_function(_hle_function) {}
 
    // Equivalente di PartialEq<[InstInfo]> per test del pattern
    bool equals(const std::vector<opcode> &other) const
@@ -217,8 +220,8 @@ extern "C" void hle_mi_cpu_clear32(uint32_t guest_pc)
          _MMU_ARM9_write32(dst + i * 4, value);
       }
    }
-   
-   post_hle(1 + len * 6 + 3);
+
+   register u32 v0 asm("v0") = 1 + len * 6 + 3; 
 }
 
 extern "C" void hle_mi_gx_fifo_send48b(u32 guest_pc)
@@ -246,7 +249,7 @@ extern "C" void hle_mi_gx_fifo_send48b(u32 guest_pc)
 
 static const std::vector<Function> FUNCTIONS_ARM9 = {
     //{GX_FIFO_SEND48B, std::size(GX_FIFO_SEND48B), "GX_FIFO_SEND48B", hle_mi_gx_fifo_send48b},
-      {MI_CPU_CLEAR32, std::size(MI_CPU_CLEAR32), "MI_CPU_CLEAR32", hle_mi_cpu_clear32},
+      {MI_CPU_CLEAR32, std::size(MI_CPU_CLEAR32), "MI_CPU_CLEAR32", hle_mi_cpu_clear32, 0},
       /*{CP_SAVE_CONTEXT, std::size(CP_SAVE_CONTEXT), "CP_SAVE_CONTEXT", hle_mi_cpu_clear32},
       {CP_RESTORE_CONTEXT, std::size(CP_RESTORE_CONTEXT), "CP_RESTORE_CONTEXT", hle_mi_cpu_clear32}*/
 
@@ -268,17 +271,17 @@ unsafe extern "C" fn hle_microcode_wait_agreement(guest_pc: u32) {
 
 void hle_microcode_shakehand(uint32_t guest_pc)
 {
-   post_hle();
+   post_hle(20);
 }
 
 void hle_microcode_wait_agreement(uint32_t guest_pc)
 {
-   post_hle();
+   post_hle(7);
 }
 
 static constexpr std::array<Function, 2> MICROCODE_FUNCTIONS = {
-    Function(MICROCODE_SHAKEHAND, std::size(MICROCODE_SHAKEHAND), "MICROCODE_SHAKEHAND", hle_microcode_shakehand),
-    Function(MICROCODE_WAIT_AGREEMENT, std::size(MICROCODE_WAIT_AGREEMENT), "MICROCODE_WAIT_AGREEMENT", hle_microcode_wait_agreement),
+    Function(MICROCODE_SHAKEHAND, std::size(MICROCODE_SHAKEHAND), "MICROCODE_SHAKEHAND", hle_microcode_shakehand, 20),
+    Function(MICROCODE_WAIT_AGREEMENT, std::size(MICROCODE_WAIT_AGREEMENT), "MICROCODE_WAIT_AGREEMENT", hle_microcode_wait_agreement, 7),
 };
 
 static uintptr_t *JIT_MEM[32] = {
@@ -1691,25 +1694,6 @@ void print_regs()
    printf("CPSR: %08X\n", NDS_ARM9.CPSR.val);
 }
 
-u32 pre_hle_block_emit()
-{
-   void *code_ptr = emit_GetPtr();
-   emit_mpush(1, reg_gpr + psp_ra);
-
-   return (u32)code_ptr;
-}
-
-void post_hle_block_emit(u32 block_start_addr, u32 base_adr, u32 interpreted_cycles)
-{
-   // Typically we need to return to dispatcher:
-   emit_addiu(psp_v0, psp_zero, interpreted_cycles); // Arbitrary low cycle count
-   emit_mpop(1, reg_gpr + psp_ra);
-   emit_jra();
-   emit_movi(psp_v1, 0); // Not idle
-
-   make_address_range_executable(block_start_addr, (u32)emit_GetPtr());
-   JIT_COMPILED_FUNC(base_adr, ARM9) = (uintptr_t)block_start_addr;
-}
 
 int executed_cycles = 0;
 int continue_cpu_exec(u32 cycles)
@@ -1733,6 +1717,10 @@ int continue_cpu_exec(u32 cycles)
 
       const int tmp = executed_cycles;
       executed_cycles = 0;
+      
+      if (GetFreeSpace() < 4 * 1024)
+         return tmp;
+
       return tmp + arm_jit_compile<ARM9>();
     }
 
@@ -1741,15 +1729,38 @@ int continue_cpu_exec(u32 cycles)
    return tmp;
 }
 
+u32 pre_hle_block_emit()
+{
+   void *code_ptr = emit_GetPtr();
+   emit_mpush(1, reg_gpr + psp_ra);
+
+   return (u32)code_ptr;
+}
+
+void post_hle_block_emit(u32 block_start_addr, u32 base_adr, u32 interpreted_cycles)
+{
+   // Typically we need to return to dispatcher:
+   emit_jal(continue_cpu_exec);
+   emit_move(psp_a0, psp_v0); // Arbitrary low cycle count
+   emit_mpop(1, reg_gpr + psp_ra);
+   emit_jra();
+   emit_movi(psp_v1, 0); // Not idle
+
+   make_address_range_executable(block_start_addr, (u32)emit_GetPtr());
+   JIT_COMPILED_FUNC(base_adr, ARM9) = (uintptr_t)block_start_addr;
+}
+
+
+
 bool first_time = true;
 template <int PROCNUM>
-void compile_basicblock()
+void compile_basicblock(bool interpret_only = false)
 {
    uint32_t opcode = 0;
 
    void *code_ptr = emit_GetPtr();
 
-   const bool isIdle = currentBlock.isIdleLoop(thumb);
+   const bool isIdle = interpret_only ? false : currentBlock.isIdleLoop(thumb);
 
    emit_mpush(1, reg_gpr + psp_ra);
 
@@ -1757,23 +1768,30 @@ void compile_basicblock()
 
    // const bool hle_func = compiledHLE(base_adr, thumb);
 
-   if (thumb)
-   {
-      currentBlock.emitThumbBlock<PROCNUM>();
-   }
-   else // if (!hle_func)
-   {
-      currentBlock.emitArmBlock<PROCNUM>();
-   }
+   if (!interpret_only){
+      if (thumb)
+      {
+         currentBlock.emitThumbBlock<PROCNUM>();
+      }
+      else // if (!hle_func)
+      {
+         currentBlock.emitArmBlock<PROCNUM>();
+      }
 
-   if ((currentBlock.manualPrefetch || currentBlock.JumpOP))
-   {
-      emit_lw(psp_at, RCPU, _next_instr);
-      emit_sw(psp_at, RCPU, _instr_adr);
-   }
+      if ((currentBlock.manualPrefetch || currentBlock.JumpOP))
+      {
+         emit_lw(psp_at, RCPU, _next_instr);
+         emit_sw(psp_at, RCPU, _instr_adr);
 
-   emit_jal(continue_cpu_exec);
-   emit_movi(psp_a0, interpreted_cycles);
+      }
+      
+      emit_jal(continue_cpu_exec);
+      emit_movi(psp_a0, interpreted_cycles);
+   }else {
+      ArmOpCompiled f = op_decode[PROCNUM][thumb];
+      emit_jal(f);
+      emit_nop();
+   }
 
    emit_mpop(1, reg_gpr + psp_ra);
 
@@ -2095,7 +2113,7 @@ bool emit_nitrosdk_func(uint32_t guest_pc, bool thumb)
          u32 addr = pre_hle_block_emit();
          emit_jal(func.hle_function);
          emit_nop();
-         post_hle_block_emit(addr, base_adr, 4);
+         post_hle_block_emit(addr, base_adr, func.cycles);
          return true;
       }
    }
@@ -2171,20 +2189,19 @@ u32 arm_jit_compile()
 
    if (thumb)
    {
-      // return op_decode[PROCNUM][thumb]();
       build_ThumbBasicblock<PROCNUM>();
-      currentBlock.optimize_basicblockThumb();
+      //currentBlock.optimize_basicblockThumb();
       // return op_decode[PROCNUM][thumb]();
    }
    else
    {
       build_ArmBasicblock<PROCNUM>();
-      currentBlock.optimize_basicblock();
+      //currentBlock.optimize_basicblock();
       // return op_decode[PROCNUM][thumb]();
    }
 
+   compile_basicblock<PROCNUM>(true);
    // Return the number of cycles a bit higher than the interpreted cycles
-   compile_basicblock<PROCNUM>();
    return interpreted_cycles;
 }
 

@@ -663,7 +663,7 @@ template<int PROCNUM, bool jit>
 u32 armcpu_exec()
 {
 	static u32 last_adr = 0;
-	if constexpr(jit)
+	if constexpr(0)
 	{
 		ARMPROC.instruct_adr &= ARMPROC.CPSR.bits.T?0xFFFFFFFE:0xFFFFFFFC;
 		ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(ARMPROC.instruct_adr, PROCNUM);
@@ -704,6 +704,8 @@ u32 armcpu_exec()
 			register bool val asm("$3");
 			register uint32_t cycles asm("$2");
 			NDS_ARM9.idle_loop = val;
+
+			
 			return cycles;
 		}
 

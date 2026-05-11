@@ -391,7 +391,7 @@ struct GameInfo
 
 	bool loadROM(std::string fname, u32 type = ROM_NDS);
 	void closeROM();
-	u32 readROM(u32 pos);
+	u32 readROM(u32 pos, bool store = false);
 	void populate();
 	bool isDSiEnhanced();
 	bool isHomebrew();

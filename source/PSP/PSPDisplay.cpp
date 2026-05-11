@@ -445,8 +445,10 @@ void EMU_SCREEN(bool skip2d, bool skip3d)
     // Il menu HUD (configurazione) viene disegnato DOPO EMU_SCREEN
     // nella stessa chiamata sceGuStart/Finish, quindi deve restare
     // sullo stesso buffer. Lo swap avviene solo alla fine del frame completo.
+    sceGuTexFlush();
     sceGuFinish();
-    // NO sceGuSwapBuffers() qui
+
+     
     emuFrameStarted = true;
 }
 

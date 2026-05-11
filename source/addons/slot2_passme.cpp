@@ -31,7 +31,7 @@ public:
 	{
 		u32 tmp_addr = (addr & 0x07FFFFFF);
 		if (tmp_addr < gameInfo.romsize)
-			return (u8)gameInfo.readROM(tmp_addr);
+			return (u8)gameInfo.readROM(tmp_addr, true);
 
 		return (0xFF);
 	}
@@ -39,7 +39,7 @@ public:
 	{
 		u32 tmp_addr = (addr & 0x07FFFFFF);
 		if (tmp_addr < gameInfo.romsize)
-			return (u16)gameInfo.readROM(tmp_addr);
+			return (u16)gameInfo.readROM(tmp_addr, true);
 
 		return (0xFFFF);
 	}
@@ -47,7 +47,7 @@ public:
 	{
 		u32 tmp_addr = (addr & 0x07FFFFFF);
 		if (tmp_addr < gameInfo.romsize)
-			return (u32)gameInfo.readROM(tmp_addr);
+			return (u32)gameInfo.readROM(tmp_addr, true);
 
 		return (0xFFFFFFFF);
 	}

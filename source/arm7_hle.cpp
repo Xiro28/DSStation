@@ -36,6 +36,14 @@ int Sound_Engine;
 void SendIPCSync(u8 val)
 {
     IPCSync9 = (IPCSync9 & 0xFFF0) | (val & 0xF);
+
+    printf("[HLE] SendIPCSync: val=%d IPCSync9=0x%04X IRQ_EN=%d\n",
+        val, IPCSync9, (IPCSync9 >> 14) & 1);
+
+    if (IPCSync9 & (1 << 14)) {
+        printf("[HLE] Firing IRQ_BIT_IPCSYNC on ARM9\n");
+        NDS_makeIrq(ARMCPU_ARM9, IRQ_BIT_IPCSYNC); // IRQ bit 16
+    }
 }
 
 void SendIPCReply(u32 service, u32 data, u32 flag)
@@ -43,10 +51,14 @@ void SendIPCReply(u32 service, u32 data, u32 flag)
     u32 val = (service & 0x1F) | (data << 6) | ((flag & 0x1) << 5);
 
     if (IPCFIFO7.IsFull()){
-        //printf("!!!! IPC FIFO FULL\n");
+        printf("[HLE] WARNING: IPCFIFO7 full, dropping reply svc=%d data=0x%08X flag=%d\n",
+            service, data, flag);
         IPCFIFOCnt7 |= 0x4000;
         IPCFIFOCnt7 |= IPCFIFOCNT_SENDFULL;
         IPCFIFOCnt9 |= IPCFIFOCNT_RECVFULL;
+        if (IPCFIFOCnt9 & IPCFIFOCNT_RECVIRQEN)
+            NDS_makeIrq(ARM9, IRQ_BIT_IPCFIFO_RECVNONEMPTY);
+        return;
     }else
     {
         bool wasempty = IPCFIFO7.IsEmpty();
@@ -57,7 +69,7 @@ void SendIPCReply(u32 service, u32 data, u32 flag)
             IPCFIFOCnt9 &= ~IPCFIFOCNT_RECVEMPTY;
 
             if (IPCFIFOCnt9 & IPCFIFOCNT_RECVIRQEN)
-                NDS_makeIrq(0, IRQ_BIT_IPCFIFO_RECVNONEMPTY);
+                NDS_makeIrq(ARM9, IRQ_BIT_IPCFIFO_RECVNONEMPTY);
         }
     }
 }
@@ -65,8 +77,8 @@ void SendIPCReply(u32 service, u32 data, u32 flag)
 void HLE_Reset(){
     IPCSync9 = 0;
     IPCSync7 = 0;
-    IPCFIFOCnt9 = 0;
-    IPCFIFOCnt7 = 0;
+    IPCFIFOCnt9 = IPCFIFOCNT_FIFOENABLE;  // 0x8000 - mimics NDS firmware init
+    IPCFIFOCnt7 = IPCFIFOCNT_FIFOENABLE;  // 0x8000 - mimics NDS firmware init
     SM_Command = 0;
     SM_DataPos = 0;
     SM_Buffer = 0;
@@ -126,14 +138,9 @@ void OnIPCRequest_CartSave(u32 data)
             const u32 dst = _MMU_read32<ARMCPU_ARM7>(SM_Buffer+0x10);
             const u32 len = _MMU_read32<ARMCPU_ARM7>(SM_Buffer+0x14);
 
-            u32 memlen = MMU_new.backupDevice.info.mem_size-1;
-
+            u32 memlen = MMU_new.backupDevice.info.mem_size - 1;
             
-
-            //printf("SAVEMEM: read %08X %08X %08X %08X\n", offset, dst, len, memlen);
-
-            
-            u32 remaining = len;
+            s32 remaining = len;
             u32 currOffset = offset;
             u32 currDst = dst;
 
@@ -144,33 +151,15 @@ void OnIPCRequest_CartSave(u32 data)
 
                 for (u32 i = 0; i < toRead; i++)
                 {
-                    _MMU_write08<ARMCPU_ARM7>(currDst + i, buffer[i]);
+                    _MMU_write08<ARMCPU_ARM7>(currDst++, buffer[i]);
                 }
 
                 currOffset += toRead;
-                currDst += toRead;
                 remaining -= toRead;
             }
 
-            /*for (u32 i = 0; i < len;)
-                {
 
-                    u32 val = 0xff;
-                    
-                    if (i + 4 <= len)
-                    {
-                        val = MMU_new.backupDevice.readWord((offset + i) & memlen, 0xffffffff);
-                        _MMU_write32<ARMCPU_ARM7>(dst + i, val);
-                        i += 4;
-                        continue;
-                    }
-                    
-                    MMU_new.backupDevice.readByte((offset + i) & memlen, 0xff);
-                    _MMU_write08<ARMCPU_ARM7>(dst + i, val);
-                    i += 1;
-                }*/
-
-                    SendIPCReply(0xB, 0x1, 1);
+            SendIPCReply(0xB, 0x1, 1);
             
             SM_DataPos = 0;  
             return;
@@ -185,11 +174,14 @@ void OnIPCRequest_CartSave(u32 data)
             const u32 len = _MMU_read32<ARMCPU_ARM7>(SM_Buffer+0x14);
 
 
+            const u32 memlen = MMU_new.backupDevice.info.mem_size - 1;
             for (u32 i = 0; i < len; i++)
             {
                 const char val = _MMU_read08<ARMCPU_ARM7>(src + i);
-                MMU_new.backupDevice.writeByte(offset + i, val);
+                MMU_new.backupDevice.writeByte((offset + i) & memlen, val);
             }
+
+            _MMU_write16<ARMCPU_ARM7>(SM_Buffer + 0x02, 0);
 
             
             SendIPCReply(0xB, 0x1, 1);
@@ -200,6 +192,7 @@ void OnIPCRequest_CartSave(u32 data)
 
     case 9: // verify
         {
+            _MMU_write16<ARMCPU_ARM7>(SM_Buffer + 0x02, 0);
             SendIPCReply(0xB, 0x1, 1);
             SM_DataPos = 0;
             return;
@@ -787,7 +780,7 @@ void executeARM7Stuff(){
 
    //printf("ARM7: %08X\n", val);
 
-   int fram_counter = _MMU_read32<ARMCPU_ARM7>(0x27FFC3C);
+   u32 fram_counter = _MMU_read32<ARMCPU_ARM7>(0x27FFC3C);
     _MMU_write32<ARM7>(0x27FFC3C, fram_counter+1);
 
     if (nds.is_twl_sdk()){
@@ -811,10 +804,11 @@ void executeARM7Stuff(){
 }
 
 void HLE_IPCSYNC(){
-    //printf("HLE: IPCSYNC %d\n", val);
-
     u8 val = IPCSync7 & 0xF;
-    
+
+    printf("[HLE] HLE_IPCSYNC: IPCSync7=0x%04X IPCSync9=0x%04X val=%d\n",
+        IPCSync7, IPCSync9, val);
+
     if (val < 5)
     {
         SendIPCSync(val+1);
@@ -823,7 +817,12 @@ void HLE_IPCSYNC(){
     {
         SendIPCSync(0);
 
+        printf("[HLE] IPCSYNC handshake complete! Writing ARM7 ready flag\n");
         // presumably ARM7-side ready flags for each IPC service
         _MMU_write32<ARMCPU_ARM7>(0x027FFF8C, 0x3FFF0);
+    }
+    else
+    {
+        printf("[HLE] HLE_IPCSYNC: unexpected val=%d, ignoring\n", val);
     }
 }

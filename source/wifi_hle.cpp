@@ -9,44 +9,27 @@ u32 IPCCmdAddr;
 u32 SharedMem[2];
 
 u16 Channel;
+u32 FifoPtr;
 
 
 void WiFIReset()
 {
     IPCCmdAddr = 0;
-
-    SharedMem[0] = 0;
-    SharedMem[1] = 0;
-
+    SharedMem[0] = 0;  // arm7_buf_ptr
+    SharedMem[1] = 0;  // status_ptr
     Channel = 0;
-
-    u16 chanmask = 0x2082;
-    _MMU_ARM7_write16(0x027FFCFA, chanmask);
+    FifoPtr = 0;
+    
+    _MMU_ARM7_write16(0x027FFCFA, 0x2082);
 }
 
 void WifiIPCReply(u16 cmd, u16 status, int numextra=0, u16* extra=nullptr)
 {
-    u32 replybuf = _MMU_ARM7_read32(SharedMem[0]+0x8);
-    _MMU_ARM7_write16(replybuf+0x00, cmd);
-    _MMU_ARM7_write16(replybuf+0x02, status);
-
-    if (cmd == 0xA)
-    {
-       if (numextra == 1)
-        {
-            _MMU_ARM7_write16(replybuf+0x8, 4);
-            _MMU_ARM7_write16(replybuf+0x10, extra[0]);
-            _MMU_ARM7_write16(replybuf+0x12, 0);
-        }
-    }else{
-        for (int i = 0; i < numextra; i++)
-        {
-            _MMU_ARM7_write16(replybuf+0x8+(i*2), extra[i]);
-        }
-    }
+    _MMU_ARM7_write16(FifoPtr + 0x00, cmd);
+    _MMU_ARM7_write16(FifoPtr + 0x02, status);
 
     extern void SendIPCReply(u32 service, u32 data, u32 flag = 0);
-    SendIPCReply(0xA, replybuf, 0);
+    SendIPCReply(0xA, FifoPtr, 0);
 
 }
 
@@ -59,35 +42,28 @@ void WifiOnIPCRequest(u32 addr)
 
     if (cmd < 0x2E)
     {
-        _MMU_ARM7_write32(SharedMem[1]+0x4, 1);
-        _MMU_ARM7_write16(SharedMem[1]+0x2, cmd);
-
-        //printf("WIFI HLE: IPC request %04X at %08X\n", cmd, addr);
-
-        switch (cmd)
+      switch (cmd)
         {
         case 0x0: // init
             {
                 SharedMem[0] = _MMU_ARM7_read32(addr+0x4);
                 SharedMem[1] = _MMU_ARM7_read32(addr+0x8);
-                u32 respbuf = _MMU_ARM7_read32(addr+0xC);
+                FifoPtr = _MMU_ARM7_read32(addr+0xC);
 
                 _MMU_ARM7_write32(SharedMem[0], SharedMem[1]);
-                _MMU_ARM7_write32(SharedMem[0]+0x8, respbuf);
+                _MMU_ARM7_write32(SharedMem[0]+0x8, FifoPtr);
 
 
-                _MMU_ARM7_write16(SharedMem[1], 2);
-                _MMU_ARM7_write16(SharedMem[1] + 0x4, 0);
+                _MMU_ARM7_write16(SharedMem[1] + 0x0, 2);  // WmStatus.state = Idle
+                _MMU_ARM7_write16(SharedMem[1] + 0x2, 0);  // WmStatus.busy_app_iid
                 WifiIPCReply(0x0, 0);
             }
             break;
 
         case 0x2: // deinit
             {
-                u16 status = _MMU_ARM7_read16(SharedMem[1]);
-               
-                _MMU_ARM7_write16(SharedMem[1], 0);
-                _MMU_ARM7_write16(SharedMem[1] + 0x4, 0);
+                _MMU_ARM7_write16(SharedMem[1] + 0x0, 0);  // WmStatus.state = Ready
+                _MMU_ARM7_write16(SharedMem[1] + 0x2, 0);  // WmStatus.busy_app_iid
                 WifiIPCReply(0x2, 0);
             }
             break;
@@ -95,21 +71,13 @@ void WifiOnIPCRequest(u32 addr)
 
         case 0xA: // start host scan
             {
-                u16 status = _MMU_ARM7_read16(SharedMem[1]);
-                if (status != 2 && status != 3 && status != 5)
-                {
-                    u16 ext = 4;
-                    WifiIPCReply(0xA, 3, 1, &ext);
-                    break;
-                }
+                Channel = _MMU_ARM7_read16(addr + 0x2);
+                u16 max_channel_time = _MMU_ARM7_read16(addr + 0x8);
 
-                Channel = _MMU_ARM7_read16(addr+0x2);
+                _MMU_ARM7_write16(SharedMem[1] + 0x0, 5);  // state = Scan
+                _MMU_ARM7_write16(SharedMem[1] + 0x2, 0);
 
-                _MMU_ARM7_write16(SharedMem[1], 5);
-                _MMU_ARM7_write16(SharedMem[1] + 0x4, 0);
-
-                s64 cycles = 33513982LL * 1024LL;
-                s64 delay = (cycles + 999999LL) / 1000000LL;
+                u32 delay = (u32)max_channel_time * 34418 * 1024;
                 NDS_RescheduleWiFi(delay);
             }
             return;
@@ -117,29 +85,24 @@ void WifiOnIPCRequest(u32 addr)
         case 0xB: // stop host scan
         {
 
-            u16 status = _MMU_ARM7_read16(SharedMem[1]);
-            if (status != 5)
-            {
-                WifiIPCReply(0xB, 3);
-                break;
-            }
-            
-            _MMU_ARM7_write16(SharedMem[1], 2);
-            _MMU_ARM7_write16(SharedMem[1] + 0x4, 0);
-            
+            _MMU_ARM7_write16(SharedMem[1] + 0x0, 2);  // state = Idle
+            _MMU_ARM7_write16(SharedMem[1] + 0x2, 0);
             WifiIPCReply(0xB, 0);
         }
         break;
 
         case 0xC: // connect to host
+        WifiIPCReply(0xC, 0);
         return;
 
         case 0xE: // start local MP
+        WifiIPCReply(0xE, 0);
             break;
 
         default:
-            printf("WIFI HLE: unknown command %04X\n", cmd);
-            break;
+    printf("WIFI HLE: unknown command %04X\n", cmd);
+    WifiIPCReply(cmd, 0);  // stub: risposta OK vuota
+    break;
         }
 
         _MMU_ARM7_write32(SharedMem[1]+0x4, 0);
@@ -150,16 +113,22 @@ void WifiOnIPCRequest(u32 addr)
 
 void wifi_scan_callback() {
 
-    int numextra = 1;
-    u16 extra[8+128];
-    extra[0] = Channel;
-
-    u16 status = _MMU_ARM7_read16(SharedMem[1]);
-    if (status == 0x5) // host scan in progress
+    if (_MMU_ARM7_read16(SharedMem[1]) == 5)
     {
-        WifiIPCReply(0xA, 0, 1, extra);
+        // WMStartScanCallback
+        _MMU_ARM7_write16(FifoPtr + 0x00, 0xA);   // api_id = StartScan
+        _MMU_ARM7_write16(FifoPtr + 0x02, 0);      // err_code = 0
+        _MMU_ARM7_write16(FifoPtr + 0x04, 0);      // wl_cmd_id
+        _MMU_ARM7_write16(FifoPtr + 0x06, 0);      // wl_result
+        _MMU_ARM7_write16(FifoPtr + 0x08, 4);      // state = ParentNotFound
+        // mac_addr[6] già zero
+        _MMU_ARM7_write16(FifoPtr + 0x10, Channel);
+        _MMU_ARM7_write16(FifoPtr + 0x12, 0);      // link_level
 
-        _MMU_ARM7_write32(SharedMem[1]+0x4, 0);
-        _MMU_ARM7_write16(IPCCmdAddr, 0x800A);
+        extern void SendIPCReply(u32 service, u32 data, u32 flag = 0);
+        SendIPCReply(0xA, FifoPtr, 0);
+
+        _MMU_ARM7_write32(SharedMem[1] + 0x4, 0);
+        _MMU_ARM7_write16(IPCCmdAddr, 0x8000 | 0xA);
     }
 }
