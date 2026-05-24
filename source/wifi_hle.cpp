@@ -11,6 +11,7 @@ u32 SharedMem[2];
 u16 Channel;
 u32 FifoPtr;
 
+extern void SendIPCReply(u32 service, u32 data, u32 flag = 0);
 
 void WiFIReset()
 {
@@ -28,7 +29,6 @@ void WifiIPCReply(u16 cmd, u16 status, int numextra=0, u16* extra=nullptr)
     _MMU_ARM7_write16(FifoPtr + 0x00, cmd);
     _MMU_ARM7_write16(FifoPtr + 0x02, status);
 
-    extern void SendIPCReply(u32 service, u32 data, u32 flag = 0);
     SendIPCReply(0xA, FifoPtr, 0);
 
 }
@@ -39,6 +39,8 @@ void WifiOnIPCRequest(u32 addr)
 
     u16 cmd = _MMU_ARM7_read16(addr);
     cmd &= ~0x8000;
+
+    //printf("WIFI cmd=%04X addr=%08X SharedMem=%08X %08X FifoPtr=%08X\n", cmd, addr, SharedMem[0], SharedMem[1], FifoPtr);
 
     if (cmd < 0x2E)
     {
@@ -51,6 +53,7 @@ void WifiOnIPCRequest(u32 addr)
                 FifoPtr = _MMU_ARM7_read32(addr+0xC);
 
                 _MMU_ARM7_write32(SharedMem[0], SharedMem[1]);
+                _MMU_ARM7_write32(SharedMem[0]+0x4, 0);         // _reserved
                 _MMU_ARM7_write32(SharedMem[0]+0x8, FifoPtr);
 
 
@@ -84,10 +87,20 @@ void WifiOnIPCRequest(u32 addr)
 
         case 0xB: // stop host scan
         {
-
             _MMU_ARM7_write16(SharedMem[1] + 0x0, 2);  // state = Idle
             _MMU_ARM7_write16(SharedMem[1] + 0x2, 0);
-            WifiIPCReply(0xB, 0);
+
+            _MMU_ARM7_write16(FifoPtr + 0x00, 0xB);  // apiID = StopScan
+            _MMU_ARM7_write16(FifoPtr + 0x02, 0);     // errCode = 0
+            _MMU_ARM7_write16(FifoPtr + 0x04, 0);
+            _MMU_ARM7_write16(FifoPtr + 0x06, 0);
+            _MMU_ARM7_write16(FifoPtr + 0x08, 0);     // state = 0 (clear ParentNotFound leftover)
+            _MMU_ARM7_write16(FifoPtr + 0x0A, 0);
+            _MMU_ARM7_write16(FifoPtr + 0x0C, 0);
+            _MMU_ARM7_write16(FifoPtr + 0x0E, 0);
+            _MMU_ARM7_write16(FifoPtr + 0x10, 0);
+            _MMU_ARM7_write16(FifoPtr + 0x12, 0);
+            SendIPCReply(0xA, FifoPtr, 0);
         }
         break;
 
@@ -101,7 +114,6 @@ void WifiOnIPCRequest(u32 addr)
 
         default:
     printf("WIFI HLE: unknown command %04X\n", cmd);
-    WifiIPCReply(cmd, 0);  // stub: risposta OK vuota
     break;
         }
 
@@ -112,8 +124,10 @@ void WifiOnIPCRequest(u32 addr)
 }
 
 void wifi_scan_callback() {
+    u16 state = _MMU_ARM7_read16(SharedMem[1]);
+    //printf("wifi_scan_callback: state=%d\n", state);
 
-    if (_MMU_ARM7_read16(SharedMem[1]) == 5)
+    if (state == 5)
     {
         // WMStartScanCallback
         _MMU_ARM7_write16(FifoPtr + 0x00, 0xA);   // api_id = StartScan

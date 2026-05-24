@@ -2090,7 +2090,6 @@ static void execHardware_hstart_vblankEnd()
 
 static void execHardware_hstart_vblankStart()
 {
-	// printf("--------VBLANK!!!--------\n");
 	// fire vblank interrupts if necessary
 
 	for (int i = 0; i < 2; i++)
@@ -2352,6 +2351,7 @@ void Sequencer::execHardware()
 		Sound_Nitro::Process(1);
 		hle_audio.timestamp = nds_timer + kAudioCycles;
 		sequencer.updateEvent<HLE_AUDIO, true>();
+		//printf("Audio event triggered at %llu cycles. Next trigger at %llu.\n", nds_timer, hle_audio.timestamp);
 	}
 
 #define test(X, Y)                   \

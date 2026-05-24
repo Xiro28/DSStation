@@ -1000,126 +1000,120 @@ dunno:
 	else return _MMU_ARM7_read32(addr);
 }
 
+// Per-region write dispatch entry. Indexed by addr >> 24 (256 entries = 16MB pages).
+// base == NULL means the region needs full slow-path dispatch.
+struct WritePageEntry {
+	u8  *base;      // pointer to the backing buffer
+	u32  mask;      // raw byte mask within the region
+	u32  flags;     // WPE_JIT_INVAL: must invalidate JIT block cache on write
+};
+static const u32 WPE_JIT_INVAL = 0x1;
+extern WritePageEntry mmu_write_lut_arm9[256];
+void init_mmu_write_lut();
+
 FORCEINLINE void _MMU_write08(const int PROCNUM, const MMU_ACCESS_TYPE AT, const u32 addr, u8 val)
 {
-	//CheckMemoryDebugEvent(DEBUG_EVENT_WRITE,AT,PROCNUM,addr,8,val);
-
-	//special handling for DMA: discard writes to TCM
 	if(PROCNUM==ARMCPU_ARM9 && AT == MMU_AT_DMA)
 	{
-		if(addr<0x02000000) return; //itcm
-		if((addr&(~0x3FFF)) == MMU.DTCMRegion) return; //dtcm
+		if(addr<0x02000000) return;
+		if((addr&(~0x3FFF)) == MMU.DTCMRegion) return;
 	}
 
 	if(PROCNUM==ARMCPU_ARM9)
+	{
 		if((addr&(~0x3FFF)) == MMU.DTCMRegion)
 		{
 			T1WriteByte(MMU.ARM9_DTCM, addr & 0x3FFF, val);
-#ifdef HAVE_LUA
-			CallRegisteredLuaMemHook(addr, 1, val, LUAMEMHOOK_WRITE);
-#endif
 			return;
 		}
-
-	if ( (addr & 0x0F000000) == 0x02000000) {
-#ifdef HAVE_JIT
-		if (PROCNUM == ARMCPU_ARM9)
-			JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK, 0) = 0;
-#endif
-		T1WriteByte( MMU.MAIN_MEM, addr & _MMU_MAIN_MEM_MASK, val);
-#ifdef HAVE_LUA
-		CallRegisteredLuaMemHook(addr, 1, val, LUAMEMHOOK_WRITE);
-#endif
+		const WritePageEntry &e = mmu_write_lut_arm9[addr >> 24];
+		if(e.base)
+		{
+			if(e.flags & WPE_JIT_INVAL)
+				JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK, 0) = 0;
+			T1WriteByte(e.base, addr & e.mask, val);
+			return;
+		}
+		_MMU_ARM9_write08(addr, val);
 		return;
 	}
 
-	if(PROCNUM==ARMCPU_ARM9) _MMU_ARM9_write08(addr,val);
-	else _MMU_ARM7_write08(addr,val);
-#ifdef HAVE_LUA
-	CallRegisteredLuaMemHook(addr, 1, val, LUAMEMHOOK_WRITE);
-#endif
+	if((addr & 0x0F000000) == 0x02000000) {
+		T1WriteByte(MMU.MAIN_MEM, addr & _MMU_MAIN_MEM_MASK, val);
+		return;
+	}
+	_MMU_ARM7_write08(addr, val);
 }
 
 FORCEINLINE void _MMU_write16(const int PROCNUM, const MMU_ACCESS_TYPE AT, const u32 addr, u16 val)
 {
-	//CheckMemoryDebugEvent(DEBUG_EVENT_WRITE,AT,PROCNUM,addr,16,val);
-
-	//special handling for DMA: discard writes to TCM
 	if(PROCNUM==ARMCPU_ARM9 && AT == MMU_AT_DMA)
 	{
-		if(addr<0x02000000) return; //itcm
-		if((addr&(~0x3FFF)) == MMU.DTCMRegion) return; //dtcm
+		if(addr<0x02000000) return;
+		if((addr&(~0x3FFF)) == MMU.DTCMRegion) return;
 	}
 
 	if(PROCNUM==ARMCPU_ARM9)
+	{
 		if((addr&(~0x3FFF)) == MMU.DTCMRegion)
 		{
 			T1WriteWord(MMU.ARM9_DTCM, addr & 0x3FFE, val);
-#ifdef HAVE_LUA
-			CallRegisteredLuaMemHook(addr, 2, val, LUAMEMHOOK_WRITE);
-#endif
 			return;
 		}
-
-	if ( (addr & 0x0F000000) == 0x02000000) {
-#ifdef HAVE_JIT
-		if (PROCNUM == ARMCPU_ARM9)
-			JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK16, 0) = 0;
-#endif
-		T1WriteWord( MMU.MAIN_MEM, addr & _MMU_MAIN_MEM_MASK16, val);
-#ifdef HAVE_LUA
-		CallRegisteredLuaMemHook(addr, 2, val, LUAMEMHOOK_WRITE);
-#endif
+		const WritePageEntry &e = mmu_write_lut_arm9[addr >> 24];
+		if(e.base)
+		{
+			if(e.flags & WPE_JIT_INVAL)
+				JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK16, 0) = 0;
+			T1WriteWord(e.base, addr & (e.mask & ~1u), val);
+			return;
+		}
+		_MMU_ARM9_write16(addr, val);
 		return;
 	}
 
-	if(PROCNUM==ARMCPU_ARM9) _MMU_ARM9_write16(addr,val);
-	else _MMU_ARM7_write16(addr,val);
-#ifdef HAVE_LUA
-	CallRegisteredLuaMemHook(addr, 2, val, LUAMEMHOOK_WRITE);
-#endif
+	if((addr & 0x0F000000) == 0x02000000) {
+		T1WriteWord(MMU.MAIN_MEM, addr & _MMU_MAIN_MEM_MASK16, val);
+		return;
+	}
+	_MMU_ARM7_write16(addr, val);
 }
 
 FORCEINLINE void _MMU_write32(const int PROCNUM, const MMU_ACCESS_TYPE AT, const u32 addr, u32 val)
 {
-	//CheckMemoryDebugEvent(DEBUG_EVENT_WRITE,AT,PROCNUM,addr,32,val);
-
-	//special handling for DMA: discard writes to TCM
 	if(PROCNUM==ARMCPU_ARM9 && AT == MMU_AT_DMA)
 	{
-		if(addr<0x02000000) return; //itcm
-		if((addr&(~0x3FFF)) == MMU.DTCMRegion) return; //dtcm
+		if(addr<0x02000000) return;
+		if((addr&(~0x3FFF)) == MMU.DTCMRegion) return;
 	}
 
 	if(PROCNUM==ARMCPU_ARM9)
+	{
 		if((addr&(~0x3FFF)) == MMU.DTCMRegion)
 		{
 			T1WriteLong(MMU.ARM9_DTCM, addr & 0x3FFC, val);
-#ifdef HAVE_LUA
-			CallRegisteredLuaMemHook(addr, 4, val, LUAMEMHOOK_WRITE);
-#endif
 			return;
 		}
-
-	if ( (addr & 0x0F000000) == 0x02000000) {
-#ifdef HAVE_JIT
-		if (PROCNUM == ARMCPU_ARM9){
-			JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK32, 0) = 0;
-			JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK32, 1) = 0;
+		const WritePageEntry &e = mmu_write_lut_arm9[addr >> 24];
+		if(e.base)
+		{
+			if(e.flags & WPE_JIT_INVAL)
+			{
+				JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK32, 0) = 0;
+				JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK32, 1) = 0;
+			}
+			T1WriteLong(e.base, addr & (e.mask & ~3u), val);
+			return;
 		}
-#endif
-		T1WriteLong( MMU.MAIN_MEM, addr & _MMU_MAIN_MEM_MASK32, val);
-#ifdef HAVE_LUA
-		CallRegisteredLuaMemHook(addr, 4, val, LUAMEMHOOK_WRITE);
-#endif
+		_MMU_ARM9_write32(addr, val);
 		return;
 	}
 
-	if(PROCNUM==ARMCPU_ARM9) _MMU_ARM9_write32(addr,val);
-	else _MMU_ARM7_write32(addr,val);
-#ifdef HAVE_LUA
-	CallRegisteredLuaMemHook(addr, 4, val, LUAMEMHOOK_WRITE);
-#endif
+	if((addr & 0x0F000000) == 0x02000000) {
+		T1WriteLong(MMU.MAIN_MEM, addr & _MMU_MAIN_MEM_MASK32, val);
+		return;
+	}
+	_MMU_ARM7_write32(addr, val);
 }
 
 

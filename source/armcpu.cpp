@@ -663,7 +663,7 @@ template<int PROCNUM, bool jit>
 u32 armcpu_exec()
 {
 	static u32 last_adr = 0;
-	if constexpr(0)
+	if constexpr(1)
 	{
 		ARMPROC.instruct_adr &= ARMPROC.CPSR.bits.T?0xFFFFFFFE:0xFFFFFFFC;
 		ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(ARMPROC.instruct_adr, PROCNUM);

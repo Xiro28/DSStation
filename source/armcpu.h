@@ -22,6 +22,7 @@
 #include "types.h"
 #include "bits.h"
 #include "MMU.h"
+#include "NDSSystem.h"
 
 #define CODE(i)     (((i)>>25)&0x7)
 #define OPCODE(i)   (((i)>>21)&0xF)
@@ -392,9 +393,9 @@ char* decodeIntruction(bool thumb_mode, u32 instr);
 
 static FORCEINLINE void NDS_makeIrq(int PROCNUM, u32 num)
 {
-	MMU.reg_IF_bits[ARM9] |= 1<<num;
+	MMU.reg_IF_bits[PROCNUM] |= 1<<num;
 	
-	*(bool*)(0x00010000) = true; //reschedule
+	NDS_Reschedule(); //reschedule
 }
 
 #endif

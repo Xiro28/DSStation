@@ -356,6 +356,10 @@ Sequence Sequences[16];
 Track Tracks[32];
 Alarm Alarms[8];
 
+// TEST: force-finish sequences after N audio ticks after start.
+// 0 = disabled. Set in StartSequence. Decremented in ProcessSequences.
+int SeqForceFinishCountdown[16] = {0};
+
 u8 ChanVolume[16];
 u8 ChanPan[16];
 
@@ -1058,6 +1062,8 @@ void StartSequence(int id)
 {
     Sequence* seq = &Sequences[id];
     seq->StatusFlags |= (1<<1);
+    // TEST: force-finish this seq after ~3 video frames (~9 audio ticks at 189Hz)
+    SeqForceFinishCountdown[id] = 9;
 }
 
 void ProcessCommands()
@@ -1073,7 +1079,8 @@ void ProcessCommands()
     //_MMU_ARM7_write32(0x27c3ff8, flag ^ 1);
     while (!CmdQueue.IsEmpty())
     {
-        u32 cmdbuf = CmdQueue.Read();
+        u32 cmdbuf_head = CmdQueue.Read();
+        u32 cmdbuf = cmdbuf_head;
         //printf("cmd %08X, shared mem %08X\n", cmdbuf, SharedMem);
         for (;cmdbuf;)
         {
@@ -1109,6 +1116,7 @@ void ProcessCommands()
             {
             case 0x0: // play sequence, directly
                 {
+                    printf("SND: play seq %d sbnk=%08X\n", args[0], args[3]);
                     PrepareSequence(args[0], args[1], args[2], args[3]);
                     StartSequence(args[0]);
                 }
@@ -1117,6 +1125,7 @@ void ProcessCommands()
             case 0x1: // stop sequence
                 {
                     u32 id = args[0];
+                    printf("SND: stop seq %d\n", id);
                     Sequence* seq = &Sequences[id];
                     if (!(seq->StatusFlags & (1<<0))) break;
 
@@ -1127,27 +1136,32 @@ void ProcessCommands()
                         u32 mask = _MMU_read32<ARMCPU_ARM7>(SharedMem+4);
                         mask &= ~(1<<id);
                         _MMU_write32<ARMCPU_ARM7>(SharedMem+4, mask);
+                        printf("SND: stop seq %d -> mask now=%04X\n", id, mask);
                     }
                 }
                 break;
 
             case 0x2: // prepare sequence
                 {
+                    printf("SND: prepare seq %d notedata=%08X noteoff=%08X sbnk=%08X\n",
+                        args[0], args[1], args[2], args[3]);
                     PrepareSequence(args[0], args[1], args[2], args[3]);
                 }
                 break;
 
             case 0x3: // start sequence
                 {
+                    printf("SND: start seq %d\n", args[0]);
                     StartSequence(args[0]);
                 }
                 break;
 
-               
-            case 0x4: // start sequence
+
+            case 0x4: // release/pause sequence
                 {
                     int seq_id = args[0];
                     bool flag = args[1] & 1;
+                    printf("SND: cmd4 seq %d flag=%d\n", seq_id, flag);
 
                     Sequence* seq = &Sequences[seq_id];
 
@@ -1159,7 +1173,7 @@ void ProcessCommands()
                         {
                             Track* track = GetSequenceTrack(seq, i);
                             if (!track) continue;
-                        
+
                             FinishTrack(track, seq, 127);
                             UnlinkTrackChannels(track);
                         }
@@ -1702,6 +1716,10 @@ void ProcessCommands()
             u32 val = _MMU_read32<ARMCPU_ARM7>(SharedMem);
             _MMU_write32<ARMCPU_ARM7>(SharedMem, val+1);
         }
+
+        // DSVita does NOT send cmdbuf_head reply here.
+        // Game polls SharedMem+0 counter for completion.
+        //SendIPCReply(0x7, cmdbuf_head);
     }
 }
 
@@ -2575,6 +2593,7 @@ void UpdateSequence(Sequence* seq)
     {
         if (UpdateSequenceTracks(seq, true))
         {
+            printf("SND: seq %d ended naturally\n", seq->ID);
             FinishSequence(seq);
             break;
         }
@@ -2612,12 +2631,31 @@ void ProcessSequences(bool update)
             }
         }
 
+        // TEST: force-finish after N ticks
+        if (update && SeqForceFinishCountdown[i] > 0)
+        {
+            if (--SeqForceFinishCountdown[i] == 0)
+            {
+                printf("SND: FORCE finish seq %d\n", i);
+                FinishSequence(seq);
+                continue;
+            }
+        }
+
         if (seq->StatusFlags & (1<<0))
             activemask |= (1<<i);
     }
 
     if (SharedMem)
+    {
+        u32 old_mask = _MMU_read32<ARMCPU_ARM7>(SharedMem+4);
         _MMU_write32<ARMCPU_ARM7>(SharedMem+4, activemask);
+        if (old_mask != (u32)activemask)
+        {
+            printf("SND: playerStop mask %04X->%04X\n", old_mask, activemask);
+            // DSVita does NOT send reply here either. Just update mask.
+        }
+    }
 }
 
 
@@ -2950,10 +2988,9 @@ void ReportHardwareStatus()
 
 u16 UpdateCounter()
 {
-    Counter = (Counter  * 1664525u) + 1013904223u;
-    return (u16)(Counter >> 16u);
+    Counter = (Counter * 0x19660D) + 0x3C6EF35F;
+    return (Counter >> 16);
 }
-
 
 
 
@@ -2985,7 +3022,8 @@ void OnIPCRequest(u32 data)
     }
     else if (data >= 0x02000000)
     {
-        // receiving a command buffer, add it to the queue
+        // receiving a command buffer, add it to the queue and process immediately
+        // (real ARM7 has a sound timer; we process eagerly instead)
 
         CmdQueue.Write(data);
     }

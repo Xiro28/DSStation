@@ -698,8 +698,6 @@ u32 jump_to_linked_br(u32 addr)
         return cycles;
     }*/
 
-    printf("Jump to linked branch: 0x%x\n", addr);
-
     NDS_ARM9.R[14] = NDS_ARM9.next_instruction;
     NDS_ARM9.CPSR.bits.T = BIT0(addr);
     NDS_ARM9.R[15] = addr & (0xFFFFFFFC | (NDS_ARM9.CPSR.bits.T << 1));
@@ -737,27 +735,39 @@ void _write16(u32 addr, u16 val)
 {
     if ((addr & (~0x3FFF)) == MMU.DTCMRegion)
     {
-        T1WriteWord(MMU.ARM9_DTCM, addr & 0x3FFE, ((u16)val));
+        T1WriteWord(MMU.ARM9_DTCM, addr & 0x3FFE, (u16)val);
+        return;
     }
-    else
+    const WritePageEntry &e = mmu_write_lut_arm9[addr >> 24];
+    if (e.base)
     {
-        JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK16, 0) = 0;
-        T1WriteWord(MMU.MAIN_MEM, addr & _MMU_MAIN_MEM_MASK16, val);
+        if (e.flags & WPE_JIT_INVAL)
+            JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK16, 0) = 0;
+        T1WriteWord(e.base, addr & (e.mask & ~1u), val);
+        return;
     }
+    _MMU_ARM9_write16(addr, val);
 }
 
 void _write32(u32 addr, u32 val)
 {
     if ((addr & (~0x3FFF)) == MMU.DTCMRegion)
     {
-        *(u32 *)(MMU.ARM9_DTCM + (addr & 0x3FFC)) = val;
+        T1WriteLong(MMU.ARM9_DTCM, addr & 0x3FFC, val);
+        return;
     }
-    else
+    const WritePageEntry &e = mmu_write_lut_arm9[addr >> 24];
+    if (e.base)
     {
-        JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK32, 0) = 0;
-        JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK32, 1) = 0;
-        T1WriteLong(MMU.MAIN_MEM, addr & _MMU_MAIN_MEM_MASK32, val);
+        if (e.flags & WPE_JIT_INVAL)
+        {
+            JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK32, 0) = 0;
+            JIT_COMPILED_FUNC_KNOWNBANK(addr, MAIN_MEM, _MMU_MAIN_MEM_MASK32, 1) = 0;
+        }
+        T1WriteLong(e.base, addr & (e.mask & ~3u), val);
+        return;
     }
+    _MMU_ARM9_write32(addr, val);
 }
 
 #include "FIFO.h"
@@ -818,8 +828,14 @@ void write_dma(u32 val, u32 i, s32 shift_op, u32 type)
 
 void arm_halt_hack()
 {
+    static u32 prevIE = 0;
+    if (MMU.reg_IE[0] != prevIE) {
+        printf("WFI IE changed: %08X -> %08X (IF=%08X)\n", prevIE, MMU.reg_IE[0], MMU.gen_IF<0>());
+        prevIE = MMU.reg_IE[0];
+    }
     NDS_ARM9.CPSR.bits.I = 0;
 	NDS_ARM9.freeze |= CPU_FREEZE_WAIT_IRQ;
+	NDS_Reschedule();
 }
 
 template <int PROCNUM>
@@ -1334,7 +1350,7 @@ void emitARMOP(opcode &op, const bool last_op)
                         emit_Write32(op);
                     }else*/
                     {
-                        emit_jal(_MMU_write16<PROCNUM>);
+                        emit_jal(_write16);
                         emit_ins(psp_a0, psp_zero, 0, 0);
                     }
                 } else {
@@ -1344,7 +1360,7 @@ void emitARMOP(opcode &op, const bool last_op)
                          emit_Write32(op);
                      }else*/
                     {
-                        emit_jal(_MMU_write32<PROCNUM>);
+                        emit_jal(_write32);
                         emit_ins(psp_a0, psp_zero, 1, 0);
                     }
                 }

@@ -35,6 +35,12 @@ inline void* vrelptr(void* ptr)
     return (void*)((u32)ptr & ~__MEM_START);
 }
 
+// Vertex buffer must be large enough to never wrap within a single frame:
+// sceGuDrawArray queues the pointer and dereferences it later at sceGuSync,
+// so any overwrite before then corrupts the previously-queued draws and
+// produces ghosted/duplicated geometry.
+#define VERT_BUF_SIZE 8192
+
 CACHE_ALIGN const float divide5bitBy31_LUT[32] = {
     0.0,             0.0322580645161, 0.0645161290323, 0.0967741935484,
     0.1290322580645, 0.1612903225806, 0.1935483870968, 0.2258064516129,
@@ -61,17 +67,16 @@ struct PolyAttr
     bool translucent;
     u8 fogged;
 
-    bool isVisible(bool backfacing) 
+    bool isVisible(bool backfacing)
     {
+        // `backfacing` is not actually computed for this rasterizer (it would
+        // be set by the geometry pipeline used by rasterizeSOFT). To avoid
+        // dropping legitimate polys at the CPU level, only filter out the
+        // explicit "cull both" mode here. PSP GU_CULL_FACE in SetupPoly
+        // performs the real front/back cull.
         u32 mode = (val>>4)&0x3;
-        if(mode==3 && polyid !=0) return !backfacing;
-        switch((val>>6)&3) {
-            case 0: return false;
-            case 1: return backfacing;
-            case 2: return !backfacing;
-            case 3: return true;
-            default: return false;
-        }
+        if (mode == 3 && polyid != 0) return true;     // shadow volumes: GU handles
+        return ((val>>6) & 3) != 0;                    // 0 = cull both → skip
     }
 
     void setup(u32 polyAttr)
@@ -229,21 +234,30 @@ void SetupTexture(POLY& thePoly)
     // GU_EQUAL would discard everything (no two polys share exact depth).
     // GU_GEQUAL is correct: passes when incoming depth >= buffer value.
     // Buffer starts at 0, first poly at any depth >= 0 passes. Correct.
-    if (attr.enableDepthTest) {
-    
-        if (polyAttr.decalMode) {
-            sceGuDepthFunc(GU_LEQUAL); // 1 = Sovrascrive i poligoni alla stessa profondità
-        } else {
-            //sceGuDepthFunc(GU_LESS);   // 0 = Rifiuta a parità di Z (Il background fallisce e resta DIETRO i bottoni!)
-        }
-        sceGuEnable(GU_DEPTH_TEST);
-    } else {
+    // Depth: we write nz in [0,65535] where 0=near, 65535=far. Buffer cleared
+    // to 65535. GU_LEQUAL passes when new ≤ existing → near wins, equal also
+    // wins (needed for decal/coplanar overlays like sprite shadows).
+    // Always set explicitly — leaving the previous poly's func would otherwise
+    // leak state across polys and cause flicker/duplication on overlapping geo.
+    if (attr.enableDepthTest)
+        sceGuDepthFunc(GU_LEQUAL);
+    else
         sceGuDepthFunc(GU_ALWAYS);
-        sceGuEnable(GU_DEPTH_TEST);
-    }
+    sceGuEnable(GU_DEPTH_TEST);
 
-    // culling
-    switch(attr.surfaceCullingMode) {
+    // Culling on the PSP GU.
+    // NDS polyAttr bits 6/7: 6 = "render back-facing", 7 = "render front-facing".
+    // Combined value = surfaceCullingMode in [0..3]:
+    //   0 = cull both (handled at CPU level; poly skipped before reaching here)
+    //   1 = render back only  → cull front
+    //   2 = render front only → cull back
+    //   3 = render both
+    // Our screen Y-flip (out.y = 232 - …) inverts winding: NDS-front (CW) becomes
+    // CCW on PSP and vice versa. sceGuFrontFace tells the GU which winding is
+    // FRONT; PSP then culls the opposite (back). So:
+    //   case 1: declare CW as front  → PSP culls CCW = NDS-front. ✓
+    //   case 2: declare CCW as front → PSP culls CW  = NDS-back.  ✓
+    switch (attr.surfaceCullingMode) {
         case 1:
             sceGuEnable(GU_CULL_FACE);
             sceGuFrontFace(GU_CW);
@@ -341,9 +355,9 @@ FORCEINLINE void mainLoop()
 
     auto flushBatch = [&]() {
         if (batching && batched_draws > 0) {
-            /*sceKernelDcacheWritebackRange(
+            sceKernelDcacheWritebackRange(
                 &vertices[batch_start],
-                batched_draws * sizeof(Vertex));*/
+                batched_draws * sizeof(Vertex));
             sceGuDrawArray(
                 lastPolyPrimitive,
                 GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
@@ -404,7 +418,15 @@ FORCEINLINE void mainLoop()
                 { skip = true; break; }
         if (skip) continue;
 
-        if (VertListIndex + vcnt > 1024) { flushBatch(); VertListIndex = 0; }
+        if (VertListIndex + vcnt > VERT_BUF_SIZE) {
+            // Buffer full. Flush what's batched and stop submitting more polys
+            // for this frame — wrapping back to 0 would overwrite vertex data
+            // that previously-queued sceGuDrawArray calls still reference,
+            // causing the GU to read garbage. With VERT_BUF_SIZE=8192 (192KB),
+            // hitting this cap is extremely rare in practice.
+            flushBatch();
+            break;
+        }
 
         for (int j = 0; j < vcnt; j++)
         {
@@ -466,13 +488,17 @@ static char SoftRastInit(void)
         return result;
 
     // FIX: allocate from system heap aligned to 64 bytes, not from GU EDRAM
-    // with an arbitrary offset that corrupted the pointer
-    rasterizerUnit.vertices = (struct Vertex*)memalign(64, 1024 * sizeof(struct Vertex));
+    // with an arbitrary offset that corrupted the pointer.
+    // Buffer sized to NEVER wrap during a frame (Pokemon battle scenes can push
+    // several thousand vertices). Wrapping mid-frame would corrupt vertex data
+    // that previously-queued sceGuDrawArray calls still reference, producing
+    // ghosted geometry. 8192 verts × 24 bytes = 192KB.
+    rasterizerUnit.vertices = (struct Vertex*)memalign(64, VERT_BUF_SIZE * sizeof(struct Vertex));
     if (!rasterizerUnit.vertices)
         return 0;
 
     rasterizerUnit.engine = &mainSoftRasterizer;
-    memset(rasterizerUnit.vertices, 0, 1024 * sizeof(struct Vertex));
+    memset(rasterizerUnit.vertices, 0, VERT_BUF_SIZE * sizeof(struct Vertex));
 
     TexCache_Reset();
     return result;

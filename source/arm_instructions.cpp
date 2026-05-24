@@ -6131,7 +6131,9 @@ bool force_interrupt_check(const uint32_t i)
 		NDS_ARM9.CPSR.bits.I = 0;
 
 		// Interrupts enabled, force an interrupt check
-		NDS_ARM9.freeze |= CPU_FREEZE_IRQ_IE_IF;
+		NDS_ARM9.freeze |= CPU_FREEZE_WAIT_IRQ;
+
+		NDS_Reschedule();
 
 		return true;
 	}

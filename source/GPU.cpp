@@ -1852,8 +1852,11 @@ void Screen_Reset(void)
 {
 	GPU_Reset(MainScreen.gpu, 0);
 	GPU_Reset(SubScreen.gpu, 1);
+	// sub_index is in BYTES from start of line in the 512-pixel-wide framebuffer.
+	// Main fills columns 0..255 (bytes 0..511); Sub fills 256..511 (bytes 512..1023).
+	// 256 here would put Sub at pixel 128 and overlap Main → scrambled tile output.
 	MainScreen.offset = 0;
-	SubScreen.offset = 256;
+	SubScreen.offset = 512;
 
 	
 

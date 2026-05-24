@@ -39,18 +39,18 @@ void SendIPCSync(u8 val)
 
     printf("[HLE] SendIPCSync: val=%d IPCSync9=0x%04X IRQ_EN=%d\n",
         val, IPCSync9, (IPCSync9 >> 14) & 1);
-
-    if (IPCSync9 & (1 << 14)) {
+if ((IPCSync9 & IPCSYNC_IRQ_SEND) && (IPCSync7 & IPCSYNC_IRQ_RECV)){
         printf("[HLE] Firing IRQ_BIT_IPCSYNC on ARM9\n");
         NDS_makeIrq(ARMCPU_ARM9, IRQ_BIT_IPCSYNC); // IRQ bit 16
     }
+    
 }
 
 void SendIPCReply(u32 service, u32 data, u32 flag)
 {
     u32 val = (service & 0x1F) | (data << 6) | ((flag & 0x1) << 5);
 
-    if (IPCFIFO7.IsFull()){
+    if (ipc_fifo[ARMCPU_ARM7].size > 15 ){
         printf("[HLE] WARNING: IPCFIFO7 full, dropping reply svc=%d data=0x%08X flag=%d\n",
             service, data, flag);
         IPCFIFOCnt7 |= 0x4000;
@@ -61,16 +61,7 @@ void SendIPCReply(u32 service, u32 data, u32 flag)
         return;
     }else
     {
-        bool wasempty = IPCFIFO7.IsEmpty();
-        IPCFIFO7.Write(val);
-
-        if (wasempty){
-            IPCFIFOCnt7 &= ~IPCFIFOCNT_SENDEMPTY;
-            IPCFIFOCnt9 &= ~IPCFIFOCNT_RECVEMPTY;
-
-            if (IPCFIFOCnt9 & IPCFIFOCNT_RECVIRQEN)
-                NDS_makeIrq(ARM9, IRQ_BIT_IPCFIFO_RECVNONEMPTY);
-        }
+        IPC_FIFOsend(ARMCPU_ARM7, val);
     }
 }
 
@@ -444,11 +435,9 @@ void OnIPCRequest_Powerman(u32 data)
 
             u8 ret = MMU_readPowerMan();
 
-            //printf("PM read %02X %02X\n", addr, ret);
+            //printf("PM read reg=%02X val=%02X\n", addr & 0x7F, ret);
 
-            //TODO fix me!
-
-            SendIPCReply(0x8, 0x03008000 | 0 | (((PM_Data[1] + 0x70) & 0xFF) << 8));
+            SendIPCReply(0x8, 0x03008000 | (ret & 0xFF) | (((PM_Data[1] + 0x70) & 0xFF) << 8));
         }
         break;
 
@@ -473,6 +462,13 @@ void RTC_Read(u8 reg, u32 addr, u32 len)
     rtc.cmd = reg;
 
     rtcRecv();
+
+    static u8 prev_sec = 0xFF;
+    u8 cur_sec = (len >= 7) ? rtc.data[6] : ((len == 3) ? rtc.data[2] : 0);
+    if (cur_sec != prev_sec) {
+        printf("RTC read: sec=%02X (BCD)\n", cur_sec);
+        prev_sec = cur_sec;
+    }
 
     for (u32 i = 0; i < len; i++)
     {
@@ -664,10 +660,12 @@ void OnIPCRequest_Mic(u32 data)
 
 void OnIPCRequest()
 {
-    u32 val = IPCFIFO9.Read();
+    u32 val = IPC_FIFOrecv(ARMCPU_ARM7);
 
-    if (IPCFIFO9.IsEmpty() && (IPCFIFOCnt9 & IPCFIFOCNT_SENDIRQEN))
-        NDS_makeIrq(ARM9, IRQ_BIT_IPCFIFO_SENDEMPTY);
+    if (val == 0)
+    {
+        return;
+    }
 
     
     //printf("%x %x\n", val, IPCFIFO7.Peek());
@@ -676,7 +674,8 @@ void OnIPCRequest()
     u32 data = val >> 6;
     bool flag = ((val >> 5) & 0x1) != 0;
 
-    //printf("IPC: %08X %08X %08X\n", service, data, flag);
+    if (service != 0x8 && service != 0x5)
+        printf("IPC svc=%02X data=%08X flag=%d\n", service, data, flag);
     
     switch (service)
     {
@@ -774,7 +773,9 @@ void StartScanline(u16 line)
 
 void executeARM7Stuff(){
     extern u16 get_keypad();
-	_MMU_write16<ARMCPU_ARM7>(0x027FFFA8, get_keypad());
+	// 0x027FFFA8 holds ext key state: bits 10=X, 11=Y, 13=lid
+	// get_keypad already returns regular keypad in bits 0-9 + X/Y in bits 10-11
+	_MMU_write16<ARMCPU_ARM7>(0x027FFFA8, get_keypad() & 0x2C00);
    
    //u32 val = _MMU_ARM7_read32(HW_INTR_CHECK_BUF);
 

@@ -1785,13 +1785,14 @@ void compile_basicblock(bool interpret_only = false)
 
       }
       
-      emit_jal(continue_cpu_exec);
-      emit_movi(psp_a0, interpreted_cycles);
    }else {
       ArmOpCompiled f = op_decode[PROCNUM][thumb];
       emit_jal(f);
       emit_nop();
    }
+
+   emit_jal(continue_cpu_exec);
+   emit_movi(psp_a0, interpreted_cycles);
 
    emit_mpop(1, reg_gpr + psp_ra);
 
@@ -2095,8 +2096,8 @@ bool emit_nitrosdk_func(uint32_t guest_pc, bool thumb)
    }
 
    const std::vector<Function> *functions = &FUNCTIONS_ARM9;
-
    
+   /*
    interpreted_cycles = 1;
    for (const auto &func : *functions)
    {      
@@ -2117,7 +2118,7 @@ bool emit_nitrosdk_func(uint32_t guest_pc, bool thumb)
          return true;
       }
    }
-
+*/
    pc = old_pc;
    currentBlock.clearBlock();
    return false;
@@ -2200,7 +2201,7 @@ u32 arm_jit_compile()
       // return op_decode[PROCNUM][thumb]();
    }
 
-   compile_basicblock<PROCNUM>(true);
+   compile_basicblock<PROCNUM>();
    // Return the number of cycles a bit higher than the interpreted cycles
    return interpreted_cycles;
 }

@@ -60,8 +60,46 @@ void* doubleBuffer = (void*)VRAM_FB1_OFFSET;
 void* depthBuffer  = (void*)VRAM_DEPTH_OFFSET;
 
 
-u8* DISP_POINTER = (u8*)(0x44000000u + 0x100000u); 
+u8* DISP_POINTER = (u8*)(0x44000000u + 0x100000u);
 u8* DISP_POINTER_FRONT = (u8*)(0x44000000u + 0x100000u + 512 * 192 * 2);
+
+// ─── FRONT layer double-buffer ───────────────────────────────────────────────
+//
+// Problem this solves:
+//   The NDS 2D pipeline writes the FRONT (above-3D) overlay sparsely — it only
+//   touches pixels that actually belong to a FRONT-priority sprite/BG. The
+//   rest of the buffer keeps whatever value was there before. With a single
+//   persistent buffer, sprites that move leave "ghost" copies at their old
+//   positions (the alpha bit stays set, so the alpha test in Draw2DTexture
+//   keeps drawing them on top of the 3D every frame).
+//
+// Why not just memset GPU_Screen_extra each frame:
+//   `renderScreenFull()` in NDSSystem.cpp alternates between MAIN and SUB
+//   every frame as a frame-skip optimization. Only MAIN writes the FRONT
+//   layer (see GPU.cpp ~line 2095: `gpu->core == GPU_MAIN && dispCnt->BG0_3D`).
+//   So clearing every frame wipes MAIN's FRONT on SUB frames → HUD flickers.
+//   AND the existing DMA in NDSSystem.cpp runs at the START of each frame
+//   and copies GPU_Screen_extra → VRAM 0x04130000; if we cleared at end of
+//   one frame, next frame's DMA copies the clear and the display goes blank.
+//
+// Solution (true double-buffer, see EMU_SCREEN_Finish for the swap logic):
+//   - Allocate TWO FRONT buffers in system RAM.
+//   - GPU_Screen_extra always points at the "write" buffer; the GPU's sparse
+//     writes accumulate there for the current MAIN render.
+//   - EMU_SCREEN reads the OTHER buffer ("display") via sceGuTexImage,
+//     bypassing the existing DMA-to-VRAM path entirely (the DMA still runs
+//     but its destination 0x04130000 is no longer consulted).
+//   - After a MAIN render finishes, swap the two indices and CLEAR the new
+//     write buffer. That way the next MAIN render starts from zero (no ghost)
+//     while the display keeps showing the freshly captured frame.
+//
+// Double is sufficient (not triple) because the EMU_SCREEN_Finish sceGuSync
+// already guarantees the GU has consumed the texture before we touch it —
+// no reader/writer race, so we don't need a spare "in-flight" buffer.
+#define FRONT_BUF_SIZE (512 * 192 * 2)   // 192 KB, stride 1024 bytes/line
+static u8* front_bufs[2] = { NULL, NULL };
+static int front_display_idx = 0;
+static int front_write_idx   = 1;
 
 intraFont* Font;
 intraFont* RomFont;
@@ -315,22 +353,25 @@ struct DispVertexTextured {
 
 static void Draw2DTexture(volatile u8* texture_buffer, int screen_x, int screen_y, int screen_w, int screen_h, int u_start = -1) {
     sceGuEnable(GU_TEXTURE_2D);
-	sceGuTexMode(GU_PSM_5551, 0, 0, 0); 
-    
-    sceGuTexImage(0, 512, 256, 512, (void*)texture_buffer); 
-    
-    sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA); 
-    
-    sceGuEnable(GU_ALPHA_TEST);  // Abilita test alpha per trasparenza HUD
-	sceGuAlphaFunc(GU_GREATER, 0, 0xFF);
+    sceGuTexMode(GU_PSM_5551, 0, 0, 0);
+    // Explicit filter/wrap: the 3D pass leaves arbitrary state here (varies per
+    // polygon). Without this the framebuffer texture can be sampled with
+    // GU_LINEAR (blurry) or REPEAT (wraparound tile garbage at edges).
+    sceGuTexFilter(GU_NEAREST, GU_NEAREST);
+    sceGuTexWrap(GU_CLAMP, GU_CLAMP);
+    sceGuTexImage(0, 512, 256, 512, (void*)texture_buffer);
+    // Texture cache must be flushed AFTER binding a new image — otherwise the
+    // GU samples stale texels left over from the last 3D polygon's texture.
+    sceGuTexFlush();
+    sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
+    sceGuTexScale(1.0f, 1.0f);
+    sceGuTexOffset(0.0f, 0.0f);
 
-	if (u_start == -1){
-		sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_slices_left  * 2, NULL, slices_left);
-		sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_slices_right * 2, NULL, slices_right);
-	}else{
-		sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_slices_left  * 2, NULL, slices_left);
-		sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_slices_right * 2, NULL, slices_right);
-	}
+    sceGuEnable(GU_ALPHA_TEST);          // transparent NDS pixels (alpha bit 0)
+    sceGuAlphaFunc(GU_GREATER, 0, 0xFF); // pass only if alpha != 0
+
+    sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_slices_left  * 2, NULL, slices_left);
+    sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_slices_right * 2, NULL, slices_right);
 }
 
 void EMU_SCREEN(bool skip2d, bool skip3d)
@@ -407,19 +448,22 @@ void EMU_SCREEN(bool skip2d, bool skip3d)
 
         // 3. FRONT LAYER (HUD, Sprite 2D davanti al 3D)
         sceGuDisable(GU_DEPTH_TEST); // Non fa tagliare l'HUD dal 3D
-		sceGuDisable(GU_BLEND);  
-        Draw2DTexture(DISP_POINTER_FRONT, screen_x, screen_y, screen_w, screen_h, u_start);
+        sceGuDisable(GU_BLEND);
+        // Read from our managed display buffer (system RAM) instead of the
+        // DMA destination at DISP_POINTER_FRONT. The DMA still copies to that
+        // VRAM address but its result is no longer consulted — the double-
+        // buffer logic in EMU_SCREEN_Finish maintains front_bufs[display_idx]
+        // with the most recent complete MAIN render.
+        volatile u8* front_src = front_bufs[front_display_idx]
+                                 ? (volatile u8*)front_bufs[front_display_idx]
+                                 : (volatile u8*)DISP_POINTER_FRONT; // fallback before init
+        Draw2DTexture(front_src, screen_x, screen_y, screen_w, screen_h, u_start);
     }
     else
     {
         sceGuDisable(GU_DEPTH_TEST);
         sceGuDepthMask(GU_TRUE);
-        sceGuEnable(GU_TEXTURE_2D);
-        sceGuTexMode(GU_PSM_5551, 0, 0, 0);
-        sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
-        sceGuTexImage(0, 512, 256, 512, DISP_POINTER);
-        sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_slices_left  * 2, NULL, slices_left);
-        sceGuDrawArray(GU_SPRITES, TEXTURE_FLAGS, n_slices_right * 2, NULL, slices_right);
+        Draw2DTexture(DISP_POINTER, 0, 40, 480, 192);
     }
 
     if (my_config.cur) {
@@ -455,9 +499,54 @@ void EMU_SCREEN(bool skip2d, bool skip3d)
 void EMU_SCREEN_Finish()
 {
     if (!emuFrameStarted) return;
+
+    // sceGuSync waits for the display list to finish — once it returns the GU
+    // has finished sampling the FRONT texture, so the display buffer is free
+    // to be reused.
     sceGuSync(0, 0);
     sceGuSwapBuffers();
     emuFrameStarted = false;
+
+    // ─── FRONT double-buffer swap ───────────────────────────────────────────
+    //
+    // renderScreenFull() alternates MAIN/SUB each frame. We mirror that
+    // alternation with a static toggle. The initial state matches
+    // renderScreenFull's `static bool upScreen = true;` so the first time we
+    // run, MAIN has just been rendered.
+    //
+    // On MAIN-render frames:
+    //   - The write buffer now holds this frame's complete FRONT data
+    //     (sparse, but starting from zero because we cleared it on the
+    //     previous swap), so swap it to the display side.
+    //   - Clear the new write buffer for the next MAIN render — this is what
+    //     stops ghost trails from accumulating.
+    //   - Repoint GPU_Screen_extra so the GPU's next FRONT writes land in
+    //     the freshly-cleared buffer.
+    //
+    // On SUB-render frames:
+    //   - No FRONT writes happened, so do nothing. The display keeps showing
+    //     the most recent MAIN render (no flicker between MAIN frames).
+    if (front_bufs[0] && front_bufs[1]) {
+        static bool justRenderedMain = false;
+        justRenderedMain = !justRenderedMain;   // starts true on first call
+
+        if (justRenderedMain) {
+            const int new_display = front_write_idx;
+            const int new_write   = front_display_idx;
+
+            // Flush GPU's CPU-side writes to RAM before the GU samples them
+            // next frame.
+            sceKernelDcacheWritebackRange(front_bufs[new_display], FRONT_BUF_SIZE);
+
+            // Wipe the new write target so next MAIN starts ghost-free.
+            memset(front_bufs[new_write], 0, FRONT_BUF_SIZE);
+            sceKernelDcacheWritebackRange(front_bufs[new_write], FRONT_BUF_SIZE);
+
+            front_display_idx = new_display;
+            front_write_idx   = new_write;
+            GPU_Screen_extra  = (volatile u8*)front_bufs[new_write];
+        }
+    }
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
@@ -522,6 +611,20 @@ void Init_PSP_DISPLAY_FRAMEBUFF()
     Font = intraFontLoad("flash0:/font/ltn1.pgf", INTRAFONT_CACHE_ASCII);
     intraFontActivate(Font);
     intraFontSetStyle(Font, 0.6f, 0xFFFFFFFF, 0, 0, 0);
+
+    // Allocate our two FRONT source buffers and redirect the NDS GPU to
+    // write into the "write" half. GPU.cpp's own memalign for GPU_Screen_extra
+    // is leaked here (192 KB, one-time), which is preferable to fighting it
+    // with a free() that could race with concurrent ME-side accesses on PSP.
+    front_bufs[0] = (u8*)memalign(64, FRONT_BUF_SIZE);
+    front_bufs[1] = (u8*)memalign(64, FRONT_BUF_SIZE);
+    if (front_bufs[0] && front_bufs[1]) {
+        memset(front_bufs[0], 0, FRONT_BUF_SIZE);
+        memset(front_bufs[1], 0, FRONT_BUF_SIZE);
+        sceKernelDcacheWritebackRange(front_bufs[0], FRONT_BUF_SIZE);
+        sceKernelDcacheWritebackRange(front_bufs[1], FRONT_BUF_SIZE);
+        GPU_Screen_extra = (volatile u8*)front_bufs[front_write_idx];
+    }
 
     SetupDisplay();
 }
