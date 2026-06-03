@@ -117,6 +117,9 @@ void InitMainSettings(configured_features *params)
 	c = addSetting(settings, c, "3D always on top", "Draw 3D always on top of 2D scene", 0);
 	params->_3d_always_on_top = settings[9].value;
 
+	c = addSetting(settings, c, "AOT Pre-compile", "Compile all code before game starts (saved for next run)", 0);
+	params->aot_precompile = settings[10].value;
+
 	totalSettings = c;
 }
 
@@ -133,6 +136,7 @@ void FinalizeMainSettings(configured_features *params)
 	params->fps_cap_num = settings[7].value;
 	params->sort_3d = settings[8].value;
 	params->_3d_always_on_top = settings[9].value;
+	params->aot_precompile = settings[10].value;
 }
 
 
@@ -562,25 +566,25 @@ void DSEmuGui(char *path, char *out)
 				}
 				if (pad.Buttons & PSP_CTRL_UP)
 				{
-					selpos -= 12;
+					selpos -= 1;
 					if (selpos < 0)
 						selpos = 0;
 				}
 				else if (pad.Buttons & PSP_CTRL_DOWN)
 				{
-					selpos += 12;
+					selpos += 1;
 					if (selpos >= filelist.cnt)
 						selpos = filelist.cnt - 1;
 				}
 				else if (pad.Buttons & PSP_CTRL_LEFT)
 				{
-					selpos--;
+					selpos -= 10;
 					if (selpos < 0)
 						selpos = 0;
 				}
 				else if (pad.Buttons & PSP_CTRL_RIGHT)
 				{
-					selpos++;
+					selpos += 10;
 					if (selpos >= filelist.cnt - 1)
 						selpos = filelist.cnt - 1;
 				}

@@ -6,6 +6,7 @@ PSP_LARGE_MEMORY = 1
 SRCDIR = ../source
 
 OBJS = $(SRCDIR)/arm_instructions.o \
+$(SRCDIR)/aot_cache.o \
 $(SRCDIR)/arm_jit.o \
 $(SRCDIR)/armcpu.o \
 $(SRCDIR)/arm7_hle.o \

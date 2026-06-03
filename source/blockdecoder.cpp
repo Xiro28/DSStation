@@ -185,7 +185,7 @@ static void FASTCALL _STRH(u32 regs, u32 imm)
     WRITE16(cpu->mem_if->data, adr, data);
 }
 
-void emit_li(u32 reg, u32 data, u32 sz = 0)
+void emit_li(u32 reg, u32 data, u32 sz)
 {
     if (data == 0 && sz == 0) {           // FAST PATH
         emit_move(reg, psp_zero);

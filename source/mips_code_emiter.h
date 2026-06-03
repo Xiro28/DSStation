@@ -3,6 +3,7 @@
 
 #include "types.h"
 #include "PSP/emit/psp_emit.h"
+#include <cstdio>
 
 //THE EMITER IS TAKEN FROM NULLDC PSP
 //CODE FROM Hlide AND Skmpt

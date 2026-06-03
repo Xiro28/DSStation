@@ -1063,7 +1063,7 @@ void StartSequence(int id)
     Sequence* seq = &Sequences[id];
     seq->StatusFlags |= (1<<1);
     // TEST: force-finish this seq after ~3 video frames (~9 audio ticks at 189Hz)
-    SeqForceFinishCountdown[id] = 9;
+    SeqForceFinishCountdown[id] = 32;
 }
 
 void ProcessCommands()

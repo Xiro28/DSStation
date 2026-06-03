@@ -115,6 +115,8 @@ enum op{
     OP_LDRSH,
     OP_LDRSB,
     OP_STMIA,
+    OP_LDRB,
+    OP_STRB,
 
     OP_SWI,
     OP_LSR_0,
@@ -228,8 +230,15 @@ class block{
             // it basically checks if one iteration of a loop depends on another
             // the rules are quite simple
 
-            // If there are any write operations or memory copies, the block isn’t idle.
-            if (WriteOP || (!thumb && MCROP))
+            if (opcodes.size() > 4) return false;
+
+            // Only safe to skip if IRQs are enabled — otherwise the loop can never exit via interrupt.
+            if (_ARMPROC.CPSR.bits.I) return false;
+
+            // If there are any write or READ operations, the block isn’t idle.
+            // A ReadOP means the loop polls memory (e.g. GXSTAT, VCOUNT) — skipping
+            // it would stall the hardware register it’s waiting on.
+            if (WriteOP || ReadOP || (!thumb && MCROP))
                 return false;
         
             // Use a 32-bit bitfield to track registers.

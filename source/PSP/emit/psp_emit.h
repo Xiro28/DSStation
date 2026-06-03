@@ -879,7 +879,7 @@ inline bool is_u8(u32 v) { return (u8)v==(s32)v; }
 inline bool is_s16(u32 v) { return (s16)v==(s32)v; }
 inline bool is_u16(u32 v) { return (u16)v==(u32)v; }
 
-void emit_li(u32 reg,u32 data,u32 sz);
+void emit_li(u32 reg,u32 data,u32 sz = 2);
 //  | j label
 #define emit_j(_target) emit_jump(j, psp_absolute_target(_target))
 //  | jal label

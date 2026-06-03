@@ -20,6 +20,7 @@ public:
 	int frameskip;
 	int fps_cap_num;
 	int DynarecBlockSize;
+	bool aot_precompile;    // run AOT pre-compilation before game starts
 	int VcountStart;
 	int firmware_language;
 	int savetype;

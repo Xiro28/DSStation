@@ -2538,7 +2538,8 @@ void GPU_RenderLine(volatile NDS_Screen * screen, u16 l, bool skip)
 	//generate the 2d engine output
 	if(gpu->dispMode == 1) {
 		//optimization: render straight to the output buffer when thats what we are going to end up displaying anyway
-		gpu->tempScanline = gpu->currDst = (u8*)(displ_pointer)+psp_addrScreenLine[l] + sub_index;//+(screen->offset + l) * 512;//(u8 *)(GPU_Screen) + psp_addrScreenLine[l] + sub_index;
+		gpu->tempScanline = gpu->currDst = (u8*)(displ_pointer)+psp_addrScreenLine[l] + sub_index;
+		memset(gpu->currDst, 0, 256 * 2);
 	} else {
 		//otherwise, we need to go to a temp buffer
 		gpu->tempScanline = gpu->currDst = (u8 *)gpu->tempScanlineBuffer;

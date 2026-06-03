@@ -1709,7 +1709,7 @@ int continue_cpu_exec(u32 cycles)
       return tmp;
     }
     
-	if (!(NDS_ARM9.freeze & CPU_FREEZE_IRQ_IE_IF) && !nds.freezeBus){
+	if (!(NDS_ARM9.freeze & CPU_FREEZE_IRQ_IE_IF) && !nds.freezeBus && !NDS_ARM9.idle_loop){
         ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(NDS_ARM9.instruct_adr, ARM9);
 
 		if (code_block)

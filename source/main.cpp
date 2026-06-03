@@ -59,7 +59,57 @@
 #include "pspprof.h"
 #endif
 
+#include "aot_cache.h"
+#include "armcpu.h"
+
 PSP_MODULE_INFO("DesmuME PSP", 0, 3, 0);
+
+// ---- JIT crash handler ----
+extern volatile u32 jit_last_guest_pc;
+extern armcpu_t NDS_ARM9;
+extern armcpu_t NDS_ARM7;
+
+static void jit_exception_handler(PspDebugRegBlock *regs)
+{
+    pspDebugScreenInit();
+    pspDebugScreenSetBackColor(0x00000000);
+    pspDebugScreenSetTextColor(0x00FF0000);
+    pspDebugScreenClear();
+
+    pspDebugScreenPrintf("*** JIT CRASH ***\n\n");
+    pspDebugScreenPrintf("Last guest PC : 0x%08X\n", jit_last_guest_pc);
+    pspDebugScreenPrintf("MIPS EPC      : 0x%08X\n", regs->epc);
+    pspDebugScreenPrintf("Cause         : 0x%08X\n", regs->cause);
+    pspDebugScreenPrintf("BadVAddr      : 0x%08X\n", regs->badvaddr);
+    pspDebugScreenPrintf("Status        : 0x%08X\n\n", regs->status);
+
+    pspDebugScreenPrintf("-- ARM9 regs --\n");
+    for (int i = 0; i < 16; i++) {
+        pspDebugScreenPrintf("R%02d=0x%08X  ", i, NDS_ARM9.R[i]);
+        if ((i & 3) == 3) pspDebugScreenPrintf("\n");
+    }
+    pspDebugScreenPrintf("CPSR=0x%08X  thumb=%d\n\n", NDS_ARM9.CPSR.val, NDS_ARM9.CPSR.bits.T);
+
+    pspDebugScreenPrintf("-- MIPS regs at crash --\n");
+    pspDebugScreenPrintf("at=0x%08X v0=0x%08X v1=0x%08X\n", regs->r[1], regs->r[2], regs->r[3]);
+    pspDebugScreenPrintf("a0=0x%08X a1=0x%08X a2=0x%08X a3=0x%08X\n",
+                          regs->r[4], regs->r[5], regs->r[6], regs->r[7]);
+    pspDebugScreenPrintf("t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X\n",
+                          regs->r[8], regs->r[9], regs->r[10], regs->r[11]);
+    pspDebugScreenPrintf("k0=0x%08X sp=0x%08X ra=0x%08X\n\n",
+                          regs->r[26], regs->r[29], regs->r[31]);
+
+    pspDebugScreenPrintf("Press X to exit.\n");
+
+    SceCtrlData pad;
+    while (1) {
+        sceCtrlReadBufferPositive(&pad, 1);
+        if (pad.Buttons & PSP_CTRL_CROSS) break;
+        sceKernelDelayThread(100000);
+    }
+    sceKernelExitGame();
+}
+// ---- end crash handler ----
 
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER | PSP_THREAD_ATTR_VFPU);
 PSP_HEAP_SIZE_KB(-2048);
@@ -516,14 +566,19 @@ void ChangeRom(bool reset)
 	
 	DSEmuGui("", rom_filename);
 	EMU_Conf();
-	
+
+	aot_init(rom_filename);
+
 	if (NDS_LoadROM(rom_filename) < 0)
 	{
 		WriteLog("ERROR ROM:");
 		WriteLog(rom_filename);
 		exit(-1);
 	}
-	
+
+	if (my_config.aot_precompile)
+		aot_precompile();
+
 	//userEnableProfiler();
 	execute = true;
 }
@@ -548,6 +603,7 @@ void deinit(){
 	#ifdef PROFILE
 	gprof_stop("desmume.out", 1);
 	#endif
+	aot_close();
 	NDS_DeInit();
 	sceKernelExitGame();
 }
@@ -560,6 +616,7 @@ int main(int argc, char **argv)
 	scePowerSetClockFrequency(333, 333, 166);
 
 	pspDebugScreenInitEx((void *)(0x44000000), PSP_DISPLAY_PIXEL_FORMAT_5551, 1);
+	//pspDebugInstallErrorHandler(jit_exception_handler);
 
 	// disable fpu exceptions
 	asm volatile(
@@ -587,7 +644,9 @@ int main(int argc, char **argv)
 
 	#ifdef PROFILE
 	execute = true;
+	aot_init("test.nds");
 	NDS_LoadROM("test.nds");
+	if (my_config.aot_precompile) aot_precompile();
 	my_config.Render3D = true;
 	my_config.showfps = true;
 #else

@@ -466,7 +466,7 @@ void RTC_Read(u8 reg, u32 addr, u32 len)
     static u8 prev_sec = 0xFF;
     u8 cur_sec = (len >= 7) ? rtc.data[6] : ((len == 3) ? rtc.data[2] : 0);
     if (cur_sec != prev_sec) {
-        printf("RTC read: sec=%02X (BCD)\n", cur_sec);
+        //printf("RTC read: sec=%02X (BCD)\n", cur_sec);
         prev_sec = cur_sec;
     }
 
@@ -674,8 +674,6 @@ void OnIPCRequest()
     u32 data = val >> 6;
     bool flag = ((val >> 5) & 0x1) != 0;
 
-    if (service != 0x8 && service != 0x5)
-        printf("IPC svc=%02X data=%08X flag=%d\n", service, data, flag);
     
     switch (service)
     {

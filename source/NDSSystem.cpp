@@ -90,6 +90,11 @@ TSCalInfo TSCal;
 unsigned int cache_hit = 0;
 unsigned int cache_miss = 0;
 
+u32 prof_jit_chains   = 0;
+u32 prof_jit_compiles = 0;
+u32 prof_dma_fallback = 0;
+u32 prof_dma_words    = 0;
+
 #define REGISTER_BASIC_EVENT(ID, TYPE) \
 	registerEvent(ID, &TYPE, \
 		[](void* instance) { \

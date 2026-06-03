@@ -353,30 +353,83 @@ void emitThumbOP(opcode& op){
         case OP_MOV:
         {
             int32_t regs[2] = {op.rd, op.rs1};
-
             regman.get(2, regs);
-            const psp_gpr_t dst = (psp_gpr_t)regs[0]; 
-            const psp_gpr_t src = (psp_gpr_t)regs[1]; 
+            const psp_gpr_t dst = (psp_gpr_t)regs[0];
+            const psp_gpr_t src = (psp_gpr_t)regs[1];
 
-            if (op.preOpType == PRE_OP_IMM){
+            if (op.preOpType == PRE_OP_IMM) {
                 emit_li(dst, op.imm);
-            }else{
+            } else if (op.preOpType == PRE_OP_LSL_IMM) {
+                emit_sll(dst, src, op.imm ? op.imm : 0);
+                if (op.saveC && op.imm) {
+                    // C = bit that was shifted out = bit (32-imm) of src
+                    emit_srl(psp_t0, src, 32 - op.imm);
+                    emit_andi(psp_t0, psp_t0, 1);
+                    emit_ins(psp_gp, psp_t0, _flag_C8, _flag_C8);
+                }
+            } else if (op.preOpType == PRE_OP_LSR_IMM) {
+                u32 sh = op.imm ? op.imm : 32;
+                if (sh >= 32) {
+                    if (op.saveC) {
+                        emit_srl(psp_t0, src, 31);
+                        emit_ins(psp_gp, psp_t0, _flag_C8, _flag_C8);
+                    }
+                    emit_move(dst, psp_zero);
+                } else {
+                    if (op.saveC) {
+                        emit_srl(psp_t0, src, sh - 1);
+                        emit_andi(psp_t0, psp_t0, 1);
+                        emit_ins(psp_gp, psp_t0, _flag_C8, _flag_C8);
+                    }
+                    emit_srl(dst, src, sh);
+                }
+            } else if (op.preOpType == PRE_OP_ASR_IMM) {
+                u32 sh = op.imm ? op.imm : 32;
+                if (sh >= 32) {
+                    emit_sra(dst, src, 31);
+                    if (op.saveC) {
+                        emit_srl(psp_t0, src, 31);
+                        emit_ins(psp_gp, psp_t0, _flag_C8, _flag_C8);
+                    }
+                } else {
+                    if (op.saveC) {
+                        emit_srl(psp_t0, src, sh - 1);
+                        emit_andi(psp_t0, psp_t0, 1);
+                        emit_ins(psp_gp, psp_t0, _flag_C8, _flag_C8);
+                    }
+                    emit_sra(dst, src, sh);
+                }
+            } else {
                 emit_move(dst, src);
             }
 
-            if (op.saveN){
+            if (op.saveN) {
                 emit_srl(psp_t0, dst, 31);
                 emit_ins(psp_gp, psp_t0, _flag_N8, _flag_N8);
             }
-
-            if (op.saveZ){
+            if (op.saveZ) {
                 emit_sltiu(psp_t0, dst, 1);
                 emit_ins(psp_gp, psp_t0, _flag_Z8, _flag_Z8);
             }
 
             regman.mark_dirty(dst);
 
-            flag_dirty = flag_dirty || (op.saveZ || op.saveN); 
+#if THUMB_JIT_DEBUG
+            {
+                regman.flush_all();
+                regman.reset();
+                emit_move(psp_a0, RCPU);
+                emit_li(psp_a1, op.preOpType == PRE_OP_LSL_IMM ? TJD_LSL :
+                                op.preOpType == PRE_OP_LSR_IMM ? TJD_LSR :
+                                op.preOpType == PRE_OP_ASR_IMM ? TJD_ASR : 99);
+                emit_li(psp_a2, op.op_pc);
+                emit_li(psp_a3, op.rd);
+                emit_jal(thumb_jit_trace);
+                emit_nop();
+            }
+#endif
+
+            flag_dirty = flag_dirty || (op.saveZ || op.saveN || op.saveC);
         }
         break;
 
@@ -392,21 +445,24 @@ void emitThumbOP(opcode& op){
 
            //printf("0x%x\n", emit_getCurrAdr());
  
-            if (op.preOpType == PRE_OP_REG) {
+            if (op.rs1 == (uint32_t)-1) {
+                // PC-relative or absolute address precomputed in imm
+                emit_li(psp_a0, op.imm & ~3u);
+            } else if (op.preOpType == PRE_OP_REG) {
                 emit_addu(psp_a0, rs1, rs2);
-            }
-            else
+            } else {
                 emit_addiu(psp_a0, rs1, op.imm);
+            }
 
             regman.flush_all();
 
             if (op._op == OP_LDR){
-                emit_sll(psp_t0, psp_a0, 3);            // t0 = (addr & 3) * 8
+                emit_sll(regs[0], psp_a0, 3);           // save rotation in callee-saved reg
 
                 emit_jal(_MMU_read32<PROCNUM>);
-                emit_ins(psp_a0, psp_zero, 1, 0);       // addr &= ~3
+                emit_ins(psp_a0, psp_zero, 1, 0);       // addr &= ~3  (delay slot)
 
-                emit_rotrv(regs[0], psp_v0, psp_t0);   // FIX: usa t0, non regs[0]
+                emit_rotrv(regs[0], psp_v0, regs[0]);  // rotate by saved amount
 
             }else{
                 emit_jal(_MMU_read16<PROCNUM>);
@@ -481,6 +537,182 @@ void emitThumbOP(opcode& op){
             regman.mark_dirty(dst);
 
             flag_dirty = flag_dirty || (op.saveZ || op.saveN);      
+        }
+        break;
+
+        case OP_BIC:
+        {
+            int32_t regs[3] = {op.rd, op.rs1, op.rs2};
+            regman.get(3, regs);
+            const psp_gpr_t dst = (psp_gpr_t)regs[0];
+            const psp_gpr_t rs1 = (psp_gpr_t)regs[1];
+            const psp_gpr_t rs2 = (psp_gpr_t)regs[2];
+
+            emit_not(psp_t0, rs2);
+            emit_and(dst, rs1, psp_t0);
+
+            if (op.saveN) {
+                emit_srl(psp_t0, dst, 31);
+                emit_ins(psp_gp, psp_t0, _flag_N8, _flag_N8);
+            }
+            if (op.saveZ) {
+                emit_sltiu(psp_t0, dst, 1);
+                emit_ins(psp_gp, psp_t0, _flag_Z8, _flag_Z8);
+            }
+
+            regman.mark_dirty(dst);
+
+#if THUMB_JIT_DEBUG
+            { regman.flush_all(); regman.reset();
+              emit_move(psp_a0, RCPU); emit_li(psp_a1, TJD_BIC);
+              emit_li(psp_a2, op.op_pc); emit_li(psp_a3, op.rd);
+              emit_jal(thumb_jit_trace); emit_nop(); }
+#endif
+
+            flag_dirty = flag_dirty || (op.saveZ || op.saveN);
+        }
+        break;
+
+        case OP_NEG:
+        {
+            int32_t regs[2] = {op.rd, op.rs1};
+            regman.get(2, regs);
+            const psp_gpr_t dst = (psp_gpr_t)regs[0];
+            const psp_gpr_t rs1 = (psp_gpr_t)regs[1];
+
+            emit_negu(dst, rs1);
+
+            if (op.saveN) {
+                emit_srl(psp_t0, dst, 31);
+                emit_ins(psp_gp, psp_t0, _flag_N8, _flag_N8);
+            }
+            if (op.saveZ) {
+                emit_sltiu(psp_t0, dst, 1);
+                emit_ins(psp_gp, psp_t0, _flag_Z8, _flag_Z8);
+            }
+            // C = (rs1 != 0) ? 0 : 1  (borrow for NEG = 0 - rs1)
+            if (op.saveC) {
+                emit_sltu(psp_t0, psp_zero, rs1);  // t0 = (rs1 != 0)
+                emit_xori(psp_t0, psp_t0, 1);       // invert
+                emit_ins(psp_gp, psp_t0, _flag_C8, _flag_C8);
+            }
+            if (op.saveV) {
+                // V = (rs1 == 0x80000000)
+                emit_lui(psp_t1, 0x8000);
+                emit_xor(psp_t0, rs1, psp_t1);
+                emit_sltiu(psp_t0, psp_t0, 1);
+                emit_ins(psp_gp, psp_t0, _flag_V8, _flag_V8);
+            }
+
+            regman.mark_dirty(dst);
+
+#if THUMB_JIT_DEBUG
+            { regman.flush_all(); regman.reset();
+              emit_move(psp_a0, RCPU); emit_li(psp_a1, TJD_NEG);
+              emit_li(psp_a2, op.op_pc); emit_li(psp_a3, op.rd);
+              emit_jal(thumb_jit_trace); emit_nop(); }
+#endif
+
+            flag_dirty = flag_dirty || (op.saveZ || op.saveN || op.saveC || op.saveV);
+        }
+        break;
+
+        case OP_CMN:
+        {
+            int32_t regs[2] = {op.rs1, op.rs2};
+            regman.get(2, regs);
+            const psp_gpr_t rs1 = (psp_gpr_t)regs[0];
+            const psp_gpr_t rs2 = (psp_gpr_t)regs[1];
+
+            emit_addu(psp_v0, rs1, rs2);
+
+            if (op.saveN) {
+                emit_srl(psp_t1, psp_v0, 31);
+                emit_ins(psp_gp, psp_t1, _flag_N8, _flag_N8);
+            }
+            if (op.saveZ) {
+                emit_sltiu(psp_t3, psp_v0, 1);
+                emit_ins(psp_gp, psp_t3, _flag_Z8, _flag_Z8);
+            }
+            if (op.saveC) {
+                // carry-out of add: result < rs1
+                emit_sltu(psp_t0, psp_v0, rs1);
+                emit_ins(psp_gp, psp_t0, _flag_C8, _flag_C8);
+            }
+            if (op.saveV) {
+                // overflow for add: (~(rs1 ^ rs2)) & (rs1 ^ result)
+                emit_xor(psp_t3, rs1, rs2);
+                emit_nor(psp_t3, psp_t3, psp_zero);  // ~(rs1^rs2)
+                emit_xor(psp_t2, rs1, psp_v0);        // rs1 ^ result
+                emit_and(psp_t2, psp_t2, psp_t3);
+                emit_srl(psp_t2, psp_t2, 31);
+                emit_ins(psp_gp, psp_t2, _flag_V8, _flag_V8);
+            }
+
+            flag_dirty = flag_dirty || (op.saveZ || op.saveN || op.saveC || op.saveV);
+        }
+        break;
+
+        case OP_LDRB:
+        {
+            int32_t regs[3] = {op.rd, op.rs1, op.rs2};
+            regman.get(3, regs);
+            const psp_gpr_t rd  = (psp_gpr_t)regs[0];
+            const psp_gpr_t rs1 = (psp_gpr_t)regs[1];
+            const psp_gpr_t rs2 = (psp_gpr_t)regs[2];
+
+            if (op.rs1 == (uint32_t)-1) {
+                // PC-relative precomputed address
+                emit_li(psp_a0, op.imm);
+            } else if (op.preOpType == PRE_OP_REG) {
+                emit_addu(psp_a0, rs1, rs2);
+            } else {
+                emit_addiu(psp_a0, rs1, op.imm);
+            }
+
+            regman.flush_all();
+            emit_jal(_MMU_read08<PROCNUM>);
+            emit_nop();
+
+            regman.reset();
+            regman.map(op.rd, rd);
+            emit_move(rd, psp_v0);
+            regman.mark_dirty(rd);
+
+#if THUMB_JIT_DEBUG
+            { regman.flush_all(); regman.reset();
+              emit_move(psp_a0, RCPU); emit_li(psp_a1, TJD_LDRB);
+              emit_li(psp_a2, op.op_pc); emit_li(psp_a3, op.rd);
+              emit_jal(thumb_jit_trace); emit_nop(); }
+#endif
+        }
+        break;
+
+        case OP_STRB:
+        {
+            int32_t regs[3] = {op.rd, op.rs1, op.rs2};
+            regman.get(3, regs);
+            const psp_gpr_t base = (psp_gpr_t)regs[0];  // base address register
+            const psp_gpr_t val  = (psp_gpr_t)regs[1];  // value to store
+            const psp_gpr_t rs2  = (psp_gpr_t)regs[2];  // index (if PRE_OP_REG)
+
+            if (op.preOpType == PRE_OP_REG) {
+                emit_addu(psp_a0, base, rs2);
+            } else {
+                emit_addiu(psp_a0, base, op.imm);
+            }
+            emit_move(psp_a1, val);
+            regman.flush_all(true);
+
+            emit_jal(_MMU_write08<PROCNUM>);
+            emit_nop();
+
+#if THUMB_JIT_DEBUG
+            { regman.flush_all(); regman.reset();
+              emit_move(psp_a0, RCPU); emit_li(psp_a1, TJD_STRB);
+              emit_li(psp_a2, op.op_pc); emit_li(psp_a3, op.rd);
+              emit_jal(thumb_jit_trace); emit_nop(); }
+#endif
         }
         break;
 
