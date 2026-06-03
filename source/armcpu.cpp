@@ -651,6 +651,8 @@ template u32 armcpu_exec<1>();
 
 
 #ifdef HAVE_JIT
+extern "C" uint32_t run_block_chain(armcpu_t*, uintptr_t);
+
 void arm_jit_sync()
 {
 	//NDS_ARM7.next_instruction = NDS_ARM7.instruct_adr;
@@ -672,41 +674,7 @@ u32 armcpu_exec()
 			printf("JIT exec %c at %08X %lu\n", PROCNUM?'7':'9', ARMPROC.instruct_adr, emit_getCurrAdr());
 		*/
 		if (code_block){
-			
-			asm volatile(
-				"addiu $sp, $sp, -28\n"
-				"sw $s0, 24($sp)\n"
-				"sw $s1, 20($sp)\n"
-				"sw $s2, 16($sp)\n"
-				"sw $s3, 12($sp)\n"
-				"sw $s4, 8($sp)\n"
-				"sw $gp, 4($sp)\n"
-				"sw $fp, 0($sp)\n"
-				"move $k0, %0\n\t"   // Move the address of ARMPROC into $k0
-				:
-				: "r" (&ARMPROC)
-			);
-			
-			
-			code_block();
-
-			asm volatile(
-				"lw $s0, 24($sp)\n"
-				"lw $s1, 20($sp)\n"
-				"lw $s2, 16($sp)\n"
-				"lw $s3, 12($sp)\n"
-				"lw $s4, 8($sp)\n"
-				"lw $gp, 4($sp)\n"
-				"lw $fp, 0($sp)\n"
-				"addiu $sp, $sp, 28\n"
-			);
-
-			register bool val asm("$3");
-			register uint32_t cycles asm("$2");
-			NDS_ARM9.idle_loop = val;
-
-			
-			return cycles;
+			return run_block_chain(&ARMPROC, (uintptr_t)code_block);
 		}
 
 		return arm_jit_compile<PROCNUM>();

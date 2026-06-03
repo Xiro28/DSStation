@@ -1696,55 +1696,131 @@ void print_regs()
 
 
 int executed_cycles = 0;
-int continue_cpu_exec(u32 cycles)
+
+// Return value of the chain: total cycles accumulated.
+extern "C" uint32_t cycles_to_return = 0;
+// Address to jump to when the chain ends (set by run_block_chain).
+extern "C" uint32_t dispatcher_ra    = 0;
+
+// Called from continue_cpu_dispatch after each block.
+// Returns 0 to end the chain, or a compiled block pointer to continue.
+extern "C" uint32_t continue_cpu_check(uint32_t cycles)
 {
    extern s32 s32next;
    extern s32 arm9;
 
    executed_cycles += cycles;
 
-    if ((arm9 + executed_cycles) > s32next || NDS_ReschedulePtr == 1){
-      const int tmp = executed_cycles;
-      executed_cycles = 0;
-      return tmp;
-    }
-    
-	if (!(NDS_ARM9.freeze & CPU_FREEZE_IRQ_IE_IF) && !nds.freezeBus && !NDS_ARM9.idle_loop){
-        ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(NDS_ARM9.instruct_adr, ARM9);
+   if ((arm9 + executed_cycles) > s32next || NDS_ReschedulePtr == 1)
+      goto exit_chain;
 
-		if (code_block)
-         return code_block();
+   if ((NDS_ARM9.freeze & CPU_FREEZE_IRQ_IE_IF) || nds.freezeBus || NDS_ARM9.idle_loop)
+      goto exit_chain;
 
-      const int tmp = executed_cycles;
-      executed_cycles = 0;
-      
+   {
+      ArmOpCompiled cb = (ArmOpCompiled)JIT_COMPILED_FUNC(NDS_ARM9.instruct_adr, ARM9);
+      if (cb)
+         return (uint32_t)cb;
+
       if (GetFreeSpace() < 4 * 1024)
-         return tmp;
+         goto exit_chain;
 
-      return tmp + arm_jit_compile<ARM9>();
-    }
+      arm_jit_compile<ARM9>();
+      cb = (ArmOpCompiled)JIT_COMPILED_FUNC(NDS_ARM9.instruct_adr, ARM9);
+      if (cb)
+         return (uint32_t)cb;
+   }
 
-   const int tmp = executed_cycles;
-   executed_cycles = 0;
-   return tmp;
+exit_chain:
+   cycles_to_return = executed_cycles;
+   executed_cycles  = 0;
+   return 0;
 }
+
+extern "C" void continue_cpu_dispatch(void);
+extern "C" uint32_t run_block_chain(armcpu_t *armproc, uintptr_t first_block);
+
+asm(
+   ".text\n"
+   ".set push\n"
+   ".set noreorder\n"
+   ".set noat\n"
+
+   // continue_cpu_dispatch — tail-call thunk between JIT blocks.
+   // $a0 = cycles of the block that just finished.
+   // Calls continue_cpu_check; if it returns 0 the chain ends,
+   // otherwise it's the pointer to the next block (tail-jumped to).
+   ".globl continue_cpu_dispatch\n"
+   ".ent   continue_cpu_dispatch\n"
+   "continue_cpu_dispatch:\n"
+   "   addiu  $sp, $sp, -8\n"
+   "   sw     $ra, 4($sp)\n"
+   "   jal    continue_cpu_check\n"
+   "   nop\n"
+   "   lw     $ra, 4($sp)\n"
+   "   addiu  $sp, $sp, 8\n"
+   "   beq    $v0, $zero, .Lccd_exit\n"
+   "   nop\n"
+   "   jr     $v0\n"           // tail-jump to next block
+   "   nop\n"
+   ".Lccd_exit:\n"
+   "   lui    $at, %hi(dispatcher_ra)\n"
+   "   lw     $ra, %lo(dispatcher_ra)($at)\n"
+   "   lui    $at, %hi(cycles_to_return)\n"
+   "   jr     $ra\n"
+   "   lw     $v0, %lo(cycles_to_return)($at)\n"  // delay slot: $v0 = total cycles
+   ".end   continue_cpu_dispatch\n"
+
+   // run_block_chain — entry point called from armcpu_exec.
+   // $a0 = &ARMPROC, $a1 = first block pointer.
+   // Returns total cycles in $v0.
+   ".globl run_block_chain\n"
+   ".ent   run_block_chain\n"
+   "run_block_chain:\n"
+   "   addiu  $sp, $sp, -32\n"
+   "   sw     $ra, 28($sp)\n"
+   "   sw     $s0, 24($sp)\n"
+   "   sw     $s1, 20($sp)\n"
+   "   sw     $s2, 16($sp)\n"
+   "   sw     $s3, 12($sp)\n"
+   "   sw     $s4,  8($sp)\n"
+   "   sw     $gp,  4($sp)\n"
+   "   sw     $fp,  0($sp)\n"
+   "   move   $k0, $a0\n"                         // $k0 = &ARMPROC (preserved across blocks)
+   "   lui    $t9, %hi(.Lrbc_resume)\n"
+   "   addiu  $t9, $t9, %lo(.Lrbc_resume)\n"
+   "   lui    $t8, %hi(dispatcher_ra)\n"
+   "   sw     $t9, %lo(dispatcher_ra)($t8)\n"     // dispatcher_ra = &.Lrbc_resume
+   "   jr     $a1\n"                               // tail-jump to first block
+   "   nop\n"
+   ".Lrbc_resume:\n"
+   "   lw     $s0, 24($sp)\n"
+   "   lw     $s1, 20($sp)\n"
+   "   lw     $s2, 16($sp)\n"
+   "   lw     $s3, 12($sp)\n"
+   "   lw     $s4,  8($sp)\n"
+   "   lw     $gp,  4($sp)\n"
+   "   lw     $fp,  0($sp)\n"
+   "   lw     $ra, 28($sp)\n"
+   "   jr     $ra\n"
+   "   addiu  $sp, $sp, 32\n"                      // delay slot
+   ".end   run_block_chain\n"
+
+   ".set pop\n"
+);
 
 u32 pre_hle_block_emit()
 {
-   void *code_ptr = emit_GetPtr();
-   emit_mpush(1, reg_gpr + psp_ra);
-
-   return (u32)code_ptr;
+   return (u32)emit_GetPtr();
 }
 
 void post_hle_block_emit(u32 block_start_addr, u32 base_adr, u32 interpreted_cycles)
 {
-   // Typically we need to return to dispatcher:
-   emit_jal(continue_cpu_exec);
-   emit_move(psp_a0, psp_v0); // Arbitrary low cycle count
-   emit_mpop(1, reg_gpr + psp_ra);
-   emit_jra();
-   emit_movi(psp_v1, 0); // Not idle
+   emit_li(psp_at, 0);
+   emit_sb(psp_at, RCPU, offsetof(armcpu_t, idle_loop));
+   emit_move(psp_a0, psp_v0);
+   emit_j((u32)continue_cpu_dispatch);
+   emit_nop();
 
    make_address_range_executable(block_start_addr, (u32)emit_GetPtr());
    JIT_COMPILED_FUNC(base_adr, ARM9) = (uintptr_t)block_start_addr;
@@ -1761,8 +1837,6 @@ void compile_basicblock(bool interpret_only = false)
    void *code_ptr = emit_GetPtr();
 
    const bool isIdle = interpret_only ? false : currentBlock.isIdleLoop(thumb);
-
-   emit_mpush(1, reg_gpr + psp_ra);
 
    // StartCodeDump();
 
@@ -1791,13 +1865,12 @@ void compile_basicblock(bool interpret_only = false)
       emit_nop();
    }
 
-   emit_jal(continue_cpu_exec);
-   emit_movi(psp_a0, interpreted_cycles);
-
-   emit_mpop(1, reg_gpr + psp_ra);
-
-   emit_jra();
-   emit_movi(psp_v1, isIdle ? 1 : 0);
+   // Epilogue: write idle_loop flag, load cycle count into $a0, tail-jump to dispatcher.
+   emit_li(psp_at, isIdle ? 1 : 0);
+   emit_sb(psp_at, RCPU, offsetof(armcpu_t, idle_loop));
+   emit_li(psp_a0, interpreted_cycles ? interpreted_cycles : 1);
+   emit_j((u32)continue_cpu_dispatch);
+   emit_nop();
 
    make_address_range_executable((u32)code_ptr, (u32)emit_GetPtr());
    JIT_COMPILED_FUNC(base_adr, PROCNUM) = (uintptr_t)code_ptr;
