@@ -15,7 +15,7 @@
 // cache-internal jumps from calls to fixed runtime helpers.
 
 #define AOT_MAGIC   0x544F4144u  // "DAOT"
-#define AOT_VERSION 2u            // bumped: added cache_base field
+#define AOT_VERSION 4u            // bumped: SRA cache 7 regs + LDM/STM JIT codegen
 
 struct AOTFileHeader {
     u32 magic;

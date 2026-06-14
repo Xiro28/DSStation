@@ -183,6 +183,38 @@ public:
         return ret;
     }
 
+    // Swizzle a linear texture into the PSP GU's tiled layout (16-byte-wide x
+    // 8-row blocks). Swizzled textures hit the GU texture cache far better than
+    // linear ones, which is usually the dominant 3D perf factor on PSP.
+    // src/dst are byte buffers; bytewidth = width_pixels * bytes_per_pixel,
+    // must be a multiple of 16; height in rows.
+    static void swizzle_texture(u8* dst, const u8* src, u32 bytewidth, u32 height)
+    {
+        const u32 width_blocks  = bytewidth / 16;
+        const u32 height_blocks = height / 8;
+        const u32 src_pitch     = (bytewidth - 16) / 4;  // u32 steps between block rows
+        const u32 src_row       = bytewidth / 4;
+
+        const u32* s = (const u32*)src;
+        u32* d = (u32*)dst;
+
+        for (u32 by = 0; by < height_blocks; by++) {
+            const u32* sb = s;
+            for (u32 bx = 0; bx < width_blocks; bx++) {
+                const u32* sr = sb;
+                for (u32 n = 0; n < 8; n++) {     // 8 rows in a block
+                    *d++ = *sr++;                 // 16 bytes = 4 u32 per row
+                    *d++ = *sr++;
+                    *d++ = *sr++;
+                    *d++ = *sr++;
+                    sr += src_pitch;              // advance to next source row
+                }
+                sb += 4;                          // next block to the right (16 bytes)
+            }
+            s += src_row * 8;                     // next block row down (8 rows)
+        }
+    }
+
     // rasterize.cpp — fix problema 1: texture magenta
 
 void SetupTexture(POLY& thePoly)
@@ -196,7 +228,6 @@ void SetupTexture(POLY& thePoly)
                                                     thePoly.texParam,
                                                     thePoly.texPalette);
     sceGuEnable(GU_TEXTURE_2D);
-    sceGuTexMode(GU_PSM_8888, 0, 0, 0);
     sceGuTexFilter(GU_NEAREST, GU_NEAREST);
     sceGuTexWrap(
         BIT16(newTexture->texformat) ? GU_REPEAT : GU_CLAMP,
@@ -208,8 +239,59 @@ void SetupTexture(POLY& thePoly)
     // explicitly rounded up to the nearest 16-pixel boundary.
     const u16 tbw = (u16)((newTexture->bufferWidth + 15) & ~15);
 
-    sceGuTexImage(0, newTexture->sizeX, newTexture->sizeY,
-                  tbw, newTexture->decoded);
+    // Swizzle the texture once (cached on the item) and upload the swizzled copy:
+    // the GU texture cache thrashes badly on linear textures. Requires the tiled
+    // dimensions to fit (bytewidth multiple of 16, height multiple of 8); 32bpp
+    // POT textures of width>=4 and height>=8 always qualify.
+    const u32 bytewidth = (u32)tbw * 4;            // GU_PSM_8888
+    // Only swizzle when the upload pitch equals the decoded pitch (no padding):
+    // otherwise the swizzler would over-read each decoded row. POT widths >= 16
+    // satisfy tbw == bufferWidth; tiny 4/8-px textures stay linear (negligible).
+    #define JIT_ENABLE_TEX_SWIZZLE 0   // disabled: swizzle path broken, debugging
+    const bool canSwizzle = JIT_ENABLE_TEX_SWIZZLE
+                            && (tbw == newTexture->bufferWidth)
+                            && (bytewidth % 16 == 0) && (newTexture->sizeY % 8 == 0)
+                            && newTexture->sizeY >= 8;
+
+    // Palettized upload (GU_PSM_T8 / GU_PSM_T4): for indexed NDS textures we upload
+    // the index buffer (1 byte/texel for T8, 4 bits/texel for T4) plus a hardware
+    // CLUT instead of the expanded 32bpp texture — 4x (T8) / 8x (T4) less texture
+    // bandwidth. Colours come from pal_clut, built with the same RGB15TO32
+    // conversion and palette-0-transparent rule as the 32bpp path, so output is
+    // identical. Buffer-width constraints: T8 needs tbw multiple of 16 texels
+    // (always true), T4 needs a multiple of 32 texels.
+    #define JIT_ENABLE_TEX_T8 1
+    #define JIT_ENABLE_TEX_T4 1
+    const bool palOK = newTexture->pal_indices && newTexture->pal_clut
+                       && (tbw == newTexture->bufferWidth);
+    const bool useT8 = JIT_ENABLE_TEX_T8 && palOK && newTexture->pal_bpp == 8;
+    const bool useT4 = JIT_ENABLE_TEX_T4 && palOK && newTexture->pal_bpp == 4
+                       && (newTexture->sizeX % 32 == 0);   // T4 pitch constraint
+
+    if (useT8) {
+        // 256-entry CLUT, 32bpp → 32 blocks of 8 entries.
+        sceGuClutMode(GU_PSM_8888, 0, 0xFF, 0);
+        sceGuClutLoad(256 / 8, newTexture->pal_clut);
+        sceGuTexMode(GU_PSM_T8, 0, 0, 0);
+        sceGuTexImage(0, newTexture->sizeX, newTexture->sizeY, tbw, newTexture->pal_indices);
+    } else if (useT4) {
+        // 16-entry CLUT (we pad/load 16 → 2 blocks of 8). 4-bit indices.
+        sceGuClutMode(GU_PSM_8888, 0, 0x0F, 0);
+        sceGuClutLoad(16 / 8, newTexture->pal_clut);
+        sceGuTexMode(GU_PSM_T4, 0, 0, 0);
+        sceGuTexImage(0, newTexture->sizeX, newTexture->sizeY, tbw, newTexture->pal_indices);
+    } else if (canSwizzle) {
+        if (!newTexture->swizzled) {
+            newTexture->swizzled = (u8*)memalign(16, bytewidth * newTexture->sizeY);
+            swizzle_texture(newTexture->swizzled, newTexture->decoded,
+                            bytewidth, newTexture->sizeY);
+        }
+        sceGuTexMode(GU_PSM_8888, 0, 0, 1);        // swizzle = 1
+        sceGuTexImage(0, newTexture->sizeX, newTexture->sizeY, tbw, newTexture->swizzled);
+    } else {
+        sceGuTexMode(GU_PSM_8888, 0, 0, 0);        // swizzle = 0 (linear)
+        sceGuTexImage(0, newTexture->sizeX, newTexture->sizeY, tbw, newTexture->decoded);
+    }
 
     // FIX: flush texture cache after uploading new texture data.
     // Without this the GU may read stale data from its internal cache.

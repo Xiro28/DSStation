@@ -17,6 +17,20 @@ void emitThumbOP(opcode& op){
         }
         break;
 
+        case OP_BC:
+        {
+            regman.flush_all(false);
+            regman.reset();
+            check_flags()
+            emit_movi(psp_v0, 1);
+            conditional(
+                emit_li(psp_a0, op.imm);
+                u32 _op = emit_SlideDelay();
+                emit_jal(jump_to_linked_bc<true>);
+                emit_Write32(_op);)
+        }
+        break;
+
         case OP_BXC:
         {
             if (flag_dirty) store_flags();
@@ -24,11 +38,11 @@ void emitThumbOP(opcode& op){
             flag_dirty = false;
 
             regman.flush_all();
-            regman.reset();  
+            regman.reset();
 
             currentBlock.JumpOP = true;
 
-            emit_li(psp_a0, op.imm); 
+            emit_li(psp_a0, op.imm);
             emit_jal(jump_to_linked_uncod_thumb);
             emit_nop();
         }

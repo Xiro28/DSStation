@@ -630,10 +630,7 @@ ARM_OP_IMM(CMP, ROR_IMM)
 ARM_OP_REG(CMP, ROR_REG)
 static INSTR_R ARM_OP_CMP_IMM_VAL(uint32_t pc, const u32 i)
 {
-   /*if (instr_is_conditional(i))
-   return INTERPRET; */
-
-   if (!full_block)
+      if (!full_block)
       return INTERPRET;
 
    currentBlock.addOP(OP_CMP, i, pc, i, REG_POS(i, 16), -1, ROR((i & 0xFF), (i >> 7) & 0x1E), PRE_OP_IMM, instr_is_conditional(i) ? CONDITION(i) : -1, EXTFL_NONE);
@@ -1017,20 +1014,16 @@ gen_ldr_sub(IMM_OFF_PREIND, PRE_OP_IMM_PRE_P, PRE_OP_IMM_PRE_M)
 
 static INSTR_R ARM_OP_BL(uint32_t pc, const u32 i)
 {
-
-   return INTERPRET;
-   if (CONDITION(i) == 0xF || instr_is_conditional(i) || NDS_ARM9.CPSR.bits.T == 1)
-   {
-   }
-   currentBlock.JumpOP = true;
+   //if (CONDITION(i) == 0xF) // BLX - switches to Thumb, complex
+      return INTERPRET;
 
    u32 off = SIGNEXTEND_24(i);
-
-   if (currentBlock.branch_addr == currentBlock.start_addr)
-      printf("WARNING: B to self\n");
-
+   u32 target = pc + 8 + (off << 2);
+   printf("[BL] pc=0x%08X target=0x%08X cond=%d\n", pc, target, instr_is_conditional(i) ? (int)CONDITION(i) : -1);
    currentBlock.addOP(OP_BLC, i, pc, -1, -1, -1, (off << 2), PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
-
+   currentBlock.JumpOP = true;
+   if (instr_is_conditional(i))
+      currentBlock.manualPrefetch = true;
    return DYNAREC;
 }
 
@@ -1142,12 +1135,77 @@ static INSTR_R ARM_OP_LDRD_STRD_POST_INDEX(uint32_t pc, const u32 i)
    return INTERPRET;
 }
 
-static INSTR_R ARM_OP_STMIA(uint32_t pc, const u32 i)
+// Shared LDM/STM compiler. Form (P/U/W/L) is decoded from the opcode at codegen
+// time, so all addressing-mode variants share this. We JIT only the safe common
+// cases: S-bit clear (no user-bank / SPSR restore), and for LDM, PC (r15) not in
+// the list (loading PC is a branch). Everything else stays interpreted.
+static INSTR_R ARM_OP_LDM_STM(uint32_t pc, const u32 i)
 {
-   return INTERPRET;
-   currentBlock.addOP(OP_STMIA, i, pc, -1, i, REG_POS(i, 16), -1, PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
+   const bool load   = (i >> 20) & 1;
+   const bool sbit   = (i >> 22) & 1;
+   const u32  rlist  = i & 0xFFFF;
+   const u32  rn     = REG_POS(i, 16);
+
+   if (sbit)
+      return INTERPRET;                 // user-bank transfer / SPSR restore
+   if (rlist == 0)
+      return INTERPRET;                 // empty list: weird base writeback semantics
+   if (rlist & 0x8000)
+      return INTERPRET;                 // PC in list: LDM=branch, STM=stale R15 (PC lives in psp_fp)
+   if (rn == 15)
+      return INTERPRET;                 // base = PC
+
+   const bool writeback = (i >> 21) & 1;
+   if (!load && writeback && (rlist & (1u << rn)))
+      return INTERPRET;                 // STM with base in list + writeback: order-dependent value
+
+   // LDM safe subset: the load mechanism is proven correct, but loading certain
+   // registers exposes a downstream JIT issue. Restrict LDM to data-register loads:
+   //  - r14 (LR) excluded: pop+return sequences are the observed crash trigger.
+   //  - base in list excluded: ARM-UNPREDICTABLE writeback ordering.
+   // STM keeps the full (non-S, non-PC) range.
+   if (load) {
+      if (rlist & (1u << 14))
+         return INTERPRET;              // LDM loading LR (return values) — interpret
+      if (rlist & (1u << rn))
+         return INTERPRET;              // base register in load list
+   }
+
+   // Bisect switches: set to 0 to fall back to interpreter for that direction.
+   #define JIT_ENABLE_LDM 1
+   #define JIT_ENABLE_STM 1
+   if (load  && !JIT_ENABLE_LDM) return INTERPRET;
+   if (!load && !JIT_ENABLE_STM) return INTERPRET;
+
+   if (!load)
+      currentBlock.WriteOP = true;
+
+   currentBlock.addOP(load ? OP_LDM : OP_STM, i, pc, rn, rn, -1, i, PRE_OP_NONE,
+                      instr_is_conditional(i) ? CONDITION(i) : -1);
+   interpreted_cycles += 2;
    return DYNAREC;
 }
+
+static INSTR_R ARM_OP_STMIA(uint32_t pc, const u32 i) { return ARM_OP_LDM_STM(pc, i); }
+
+#define ARM_OP_LDM_STM_DECL(name) \
+   static INSTR_R ARM_OP_##name(uint32_t pc, const u32 i) { return ARM_OP_LDM_STM(pc, i); }
+
+ARM_OP_LDM_STM_DECL(STMDA)
+ARM_OP_LDM_STM_DECL(LDMDA)
+ARM_OP_LDM_STM_DECL(STMDA_W)
+ARM_OP_LDM_STM_DECL(LDMDA_W)
+ARM_OP_LDM_STM_DECL(LDMIA)
+ARM_OP_LDM_STM_DECL(STMIA_W)
+ARM_OP_LDM_STM_DECL(LDMIA_W)
+ARM_OP_LDM_STM_DECL(STMDB)
+ARM_OP_LDM_STM_DECL(LDMDB)
+ARM_OP_LDM_STM_DECL(STMDB_W)
+ARM_OP_LDM_STM_DECL(LDMDB_W)
+ARM_OP_LDM_STM_DECL(STMIB)
+ARM_OP_LDM_STM_DECL(LDMIB)
+ARM_OP_LDM_STM_DECL(STMIB_W)
+ARM_OP_LDM_STM_DECL(LDMIB_W)
 
 #define ARM_OP_LDRD_STRD_OFFSET_PRE_INDEX 0
 #define ARM_OP_MSR_CPSR 0
@@ -1159,34 +1217,18 @@ static INSTR_R ARM_OP_STMIA(uint32_t pc, const u32 i)
 #define ARM_OP_LDREX 0
 #define ARM_OP_MSR_CPSR_IMM_VAL 0
 #define ARM_OP_MSR_SPSR_IMM_VAL 0
-#define ARM_OP_STMDA 0
-#define ARM_OP_LDMDA 0
-#define ARM_OP_STMDA_W 0
-#define ARM_OP_LDMDA_W 0
 #define ARM_OP_STMDA2 0
 #define ARM_OP_LDMDA2 0
 #define ARM_OP_STMDA2_W 0
 #define ARM_OP_LDMDA2_W 0
-// #define ARM_OP_STMIA 0
-#define ARM_OP_LDMIA 0
-#define ARM_OP_STMIA_W 0
-#define ARM_OP_LDMIA_W 0
 #define ARM_OP_STMIA2 0
 #define ARM_OP_LDMIA2 0
 #define ARM_OP_STMIA2_W 0
 #define ARM_OP_LDMIA2_W 0
-#define ARM_OP_STMDB 0
-#define ARM_OP_LDMDB 0
-#define ARM_OP_STMDB_W 0
-#define ARM_OP_LDMDB_W 0
 #define ARM_OP_STMDB2 0
 #define ARM_OP_LDMDB2 0
 #define ARM_OP_STMDB2_W 0
 #define ARM_OP_LDMDB2_W 0
-#define ARM_OP_STMIB 0
-#define ARM_OP_LDMIB 0
-#define ARM_OP_STMIB_W 0
-#define ARM_OP_LDMIB_W 0
 #define ARM_OP_STMIB2 0
 #define ARM_OP_LDMIB2 0
 #define ARM_OP_STMIB2_W 0
@@ -1402,11 +1444,19 @@ static INSTR_R THUMB_OP_CMP_SPE(uint32_t pc, const u32 i)
 
 static INSTR_R THUMB_OP_B_COND(uint32_t pc, const u32 i)
 {
-   return INTERPRET;
+    return INTERPRET;
+   // target = pc+4 + SignExt(offset8)*2; pass as offset from R15(=pc+4)
+   int32_t off = (int32_t)(int8_t)(i & 0xFF) << 1;
+   uint32_t cond = (i >> 8) & 0xF;
+   currentBlock.addOP(OP_BC, i, pc, -1, -1, -1, off, PRE_OP_IMM, cond, EXTFL_NOFLAGS);
+   // Conditional branch: manualPrefetch needed so fall-through case updates instr_adr
+   currentBlock.manualPrefetch = true;
+   return DYNAREC;
 }
 
 static INSTR_R THUMB_OP_B_UNCOND(uint32_t pc, const u32 i)
 {
+    return INTERPRET;
 #define SIGNEEXT_IMM11(i) (((i) & 0x7FF) | (BIT10(i) * 0xFFFFF800))
    currentBlock.addOP(OP_BXC, i, pc, -1, -1, -1, (SIGNEEXT_IMM11(i) << 1), PRE_OP_IMM, EXTFL_NOFLAGS);
    return DYNAREC;
@@ -1426,13 +1476,15 @@ static INSTR_R THUMB_OP_ADJUST_M_SP(uint32_t pc, const u32 i)
 
 static INSTR_R THUMB_OP_ADD_2PC(uint32_t pc, const u32 i)
 {
-   return INTERPRET;
+   // Rd = (PC word-aligned) + imm8*4; PC = (pc+4)&~3
+   uint32_t val = ((pc + 4) & ~3u) + ((i & 0xFF) << 2);
+   currentBlock.addOP(OP_MOV, i, pc, _REG_NUM(i, 8), -1, -1, val, PRE_OP_IMM, -1, EXTFL_NOFLAGS);
+   return DYNAREC;
 }
 
 static INSTR_R THUMB_OP_ADD_2SP(uint32_t pc, const u32 i)
 {
-   return INTERPRET;
-   currentBlock.addOP(OP_ADD, i, pc, _REG_NUM(i, 8), 13, -1, ((i & 0xFF) << 2), PRE_OP_IMM, EXTFL_NOFLAGS);
+   currentBlock.addOP(OP_ADD, i, pc, _REG_NUM(i, 8), 13, -1, ((i & 0xFF) << 2), PRE_OP_IMM, -1, EXTFL_NOFLAGS);
    return DYNAREC;
 }
 
@@ -1578,9 +1630,27 @@ static INSTR_R THUMB_OP_BX_THUMB(uint32_t pc, const u32 i)
 #define THUMB_OP_SBC_REG THUMB_OP_INTERPRET
 #define THUMB_OP_ROR_REG THUMB_OP_INTERPRET
 
-#define THUMB_OP_LDR_SPREL THUMB_OP_INTERPRET
-#define THUMB_OP_STR_SPREL THUMB_OP_INTERPRET
-#define THUMB_OP_LDR_PCREL THUMB_OP_INTERPRET
+static INSTR_R THUMB_OP_LDR_SPREL(uint32_t pc, const u32 i)
+{
+   // LDR Rd, [SP, #imm8*4]
+   currentBlock.addOP(OP_LDR, i, pc, _REG_NUM(i, 8), 13, -1, (i & 0xFF) << 2, PRE_OP_IMM, -1, EXTFL_NOFLAGS);
+   return DYNAREC;
+}
+
+static INSTR_R THUMB_OP_STR_SPREL(uint32_t pc, const u32 i)
+{
+   // STR Rd, [SP, #imm8*4]  — rd=base(SP), rs1=value
+   currentBlock.addOP(OP_STR, i, pc, 13, _REG_NUM(i, 8), -1, (i & 0xFF) << 2, PRE_OP_IMM, -1, EXTFL_NOFLAGS);
+   return DYNAREC;
+}
+
+static INSTR_R THUMB_OP_LDR_PCREL(uint32_t pc, const u32 i)
+{
+   // LDR Rd, [PC, #imm8*4]  — address constant-folded at JIT time
+   uint32_t addr = ((pc + 4) & ~3u) + ((i & 0xFF) << 2);
+   currentBlock.addOP(OP_LDR, i, pc, _REG_NUM(i, 8), -1, -1, addr, PRE_OP_IMM, -1, EXTFL_NOFLAGS);
+   return DYNAREC;
+}
 
 #define THUMB_OP_LDRSB_REG_OFF THUMB_OP_INTERPRET
 #define THUMB_OP_LDRSH_REG_OFF THUMB_OP_INTERPRET
@@ -1777,13 +1847,16 @@ asm(
    ".globl run_block_chain\n"
    ".ent   run_block_chain\n"
    "run_block_chain:\n"
-   "   addiu  $sp, $sp, -32\n"
-   "   sw     $ra, 28($sp)\n"
-   "   sw     $s0, 24($sp)\n"
-   "   sw     $s1, 20($sp)\n"
-   "   sw     $s2, 16($sp)\n"
-   "   sw     $s3, 12($sp)\n"
-   "   sw     $s4,  8($sp)\n"
+   "   addiu  $sp, $sp, -48\n"
+   "   sw     $ra, 44($sp)\n"
+   "   sw     $s0, 40($sp)\n"
+   "   sw     $s1, 36($sp)\n"
+   "   sw     $s2, 32($sp)\n"
+   "   sw     $s3, 28($sp)\n"
+   "   sw     $s4, 24($sp)\n"
+   "   sw     $s5, 20($sp)\n"
+   "   sw     $s6, 16($sp)\n"
+   "   sw     $s7, 12($sp)\n"
    "   sw     $gp,  4($sp)\n"
    "   sw     $fp,  0($sp)\n"
    "   move   $k0, $a0\n"                         // $k0 = &ARMPROC (preserved across blocks)
@@ -1794,16 +1867,19 @@ asm(
    "   jr     $a1\n"                               // tail-jump to first block
    "   nop\n"
    ".Lrbc_resume:\n"
-   "   lw     $s0, 24($sp)\n"
-   "   lw     $s1, 20($sp)\n"
-   "   lw     $s2, 16($sp)\n"
-   "   lw     $s3, 12($sp)\n"
-   "   lw     $s4,  8($sp)\n"
+   "   lw     $s0, 40($sp)\n"
+   "   lw     $s1, 36($sp)\n"
+   "   lw     $s2, 32($sp)\n"
+   "   lw     $s3, 28($sp)\n"
+   "   lw     $s4, 24($sp)\n"
+   "   lw     $s5, 20($sp)\n"
+   "   lw     $s6, 16($sp)\n"
+   "   lw     $s7, 12($sp)\n"
    "   lw     $gp,  4($sp)\n"
    "   lw     $fp,  0($sp)\n"
-   "   lw     $ra, 28($sp)\n"
+   "   lw     $ra, 44($sp)\n"
    "   jr     $ra\n"
-   "   addiu  $sp, $sp, 32\n"                      // delay slot
+   "   addiu  $sp, $sp, 48\n"                      // delay slot
    ".end   run_block_chain\n"
 
    ".set pop\n"
@@ -2019,6 +2095,26 @@ void build_ThumbBasicblock()
    {
 
       uint32_t op = _MMU_read16<PROCNUM, MMU_AT_CODE>(pc & imask);
+
+      // // Fuse BL_10 + BL_11 into a single BLC
+      // if ((op >> 11) == 0x1E) { // bits 15:11 = 11110 = BL prefix
+      //    uint32_t op2 = _MMU_read16<PROCNUM, MMU_AT_CODE>((pc + 2) & imask);
+      //    if ((op2 >> 11) == 0x1F) { // bits 15:11 = 11111 = BL suffix
+      //       int32_t hi = ((int32_t)(op  & 0x7FF) << 21) >> 9; // SignExt << 12
+      //       int32_t lo = (int32_t)((op2 & 0x7FF) << 1);
+      //       // LR = (pc+4)|1; target = (pc+4) + hi + lo
+      //       // Two ops share op_pc → both get full prefetch → R[15]=pc+6; off = hi+lo-2
+      //       uint32_t lr_val = (pc + 4) | 1;
+      //       currentBlock.addOP(OP_MOV, op, pc, 14, -1, -1, lr_val, PRE_OP_IMM, -1, EXTFL_NOFLAGS);
+      //       // R[15] at OP_BC runtime = pc+6 (two ops share same op_pc → prefetch_skip=2 → +4, then +2)
+      //       currentBlock.addOP(OP_BC,  op, pc, -1, -1, -1, hi + lo - 2, PRE_OP_IMM, -1, EXTFL_NOFLAGS);
+      //       currentBlock.manualPrefetch = true;
+      //       i++;
+      //       pc += isize;
+      //       has_ended = 1;
+      //       continue;
+      //    }
+      // }
 
       DynaCompiler fc = thumb_instruction_compilers[op >> 6];
       INSTR_R res = fc == 0 ? INTERPRET : fc(pc, op);
@@ -2270,8 +2366,31 @@ u32 arm_jit_compile()
    else
    {
       build_ArmBasicblock<PROCNUM>();
-      //currentBlock.optimize_basicblock();
+     // currentBlock.optimize_basicblock();
       // return op_decode[PROCNUM][thumb]();
+   }
+
+   {
+      static uint32_t total_ops = 0, total_itp = 0, total_blocks = 0;
+      static uint32_t itp_hist[256] = {};
+      total_blocks++;
+      for (auto &op : currentBlock.opcodes) {
+         total_ops++;
+         if (op._op == OP_ITP) {
+            total_itp++;
+            itp_hist[(op.rs1 >> (thumb ? 8 : 20)) & 0xFF]++;
+         }
+      }
+      if ((total_blocks & 0x3FFF) == 0) {
+         printf("blocks=%u ops=%u itp=%u (%u%%)\n",
+                total_blocks, total_ops, total_itp,
+                total_ops ? (total_itp * 100u / total_ops) : 0u);
+         // top-10 hottest OP_ITP instruction groups
+         uint8_t order[256]; for (int j=0;j<256;j++) order[j]=j;
+         for (int a=0;a<10;a++) for (int b=a+1;b<256;b++) if (itp_hist[order[b]]>itp_hist[order[a]]) { uint8_t t=order[a]; order[a]=order[b]; order[b]=t; }
+         for (int j=0;j<10&&itp_hist[order[j]]>0;j++)
+            printf("  itp[%02x] = %u\n", order[j], itp_hist[order[j]]);
+      }
    }
 
    compile_basicblock<PROCNUM>();

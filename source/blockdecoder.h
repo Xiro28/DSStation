@@ -117,6 +117,8 @@ enum op{
     OP_STMIA,
     OP_LDRB,
     OP_STRB,
+    OP_LDM,
+    OP_STM,
 
     OP_SWI,
     OP_LSR_0,
@@ -193,6 +195,7 @@ struct opcode{
     uint32_t extra_flags;
 
     bool check_condition = true;
+    bool dead_rd = false;   // set by liveness pass: rd is overwritten before any read
 
      // THUMB SPECIFIC
     bool saveN = true;

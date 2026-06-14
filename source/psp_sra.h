@@ -3,6 +3,15 @@
 #include <algorithm>
 #include <unordered_map>
 
+// Host registers usable to cache NDS registers.
+// s4 is excluded: it is a scratch reg used by generate_condition_check().
+// k0(RCPU), fp(PC), gp(flags) are also reserved elsewhere.
+// s5/s6/s7 were previously unused; adding them grows the cache 4->7 slots,
+// which sharply cuts spill/reload traffic for multi-operand ARM ops (LDM/STM,
+// 3-operand ALU) that used to thrash the whole cache every instruction.
+static const psp_gpr_t SRA_REGS[] = { psp_s0, psp_s1, psp_s2, psp_s3, psp_s5, psp_s6, psp_s7 };
+static const int SRA_REG_COUNT = (int)(sizeof(SRA_REGS) / sizeof(SRA_REGS[0]));
+
 class register_manager
 {
    public:
@@ -29,8 +38,9 @@ class register_manager
 
       psp_gpr_t find(uint32_t emu_reg_id)
       {
-         for (int i = psp_s0; i < psp_s4; i ++)
+         for (int k = 0; k < SRA_REG_COUNT; k ++)
          {
+            int i = SRA_REGS[k];
             if (mapping[i] == emu_reg_id)
             {
                usage_tag[i] = next_usage_tag ++;
@@ -62,8 +72,9 @@ class register_manager
          psp_gpr_t result = psp_s0;
          uint32_t lowtag = 0xFFFFFFFF;
 
-         for (int i = psp_s0; i < psp_s4; i ++)
+         for (int k = 0; k < SRA_REG_COUNT; k ++)
          {
+            int i = SRA_REGS[k];
             if (usage_tag[i] < lowtag)
             {
                lowtag = usage_tag[i];
@@ -78,9 +89,9 @@ class register_manager
 
       bool is_mapped(uint32_t emu_reg_id)
       {
-         for (int i = psp_s0; i < psp_s4; i ++)
+         for (int k = 0; k < SRA_REG_COUNT; k ++)
          {
-            if (mapping[i] == emu_reg_id)
+            if (mapping[SRA_REGS[k]] == emu_reg_id)
             {
                return true;
             }
@@ -110,11 +121,14 @@ class register_manager
             }
             else
             {
-               if (emu_reg_ids[i] == 15){
-                     emu_reg_ids[i] = psp_v1;
-                     emit_addiu(psp_v1, psp_fp, thumb ? 2 : 4);  // FIX
-                     found[i] = true;
-               }else{
+               if (emu_reg_ids[i] == 15) {
+                  // r15 is not kept in the LRU cache: psp_fp advances every
+                  // instruction, so any cached value would be stale by the next op.
+                  // Always recompute PC+8 (ARM) / PC+4 (Thumb) fresh from psp_fp.
+                  emu_reg_ids[i] = psp_v1;
+                  emit_addiu(psp_v1, psp_fp, thumb ? 2 : 4);
+                  found[i] = true;
+               } else {
                   int32_t current = get_loaded(emu_reg_ids[i] & 0xF, emu_reg_ids[i] & 0x10);
                   if (current >= 0)
                   {
@@ -183,8 +197,9 @@ class register_manager
 
       void flush_nds(uint32_t emu_reg_id, bool keep_dirty = false, bool force = false)
       {
-         for (int i = psp_s0; i < psp_s4; i ++)
+         for (int k = 0; k < SRA_REG_COUNT; k ++)
          {
+            int i = SRA_REGS[k];
             if (mapping[i] == emu_reg_id)
             {
                flush((psp_gpr_t)i, keep_dirty, force);
@@ -200,12 +215,9 @@ class register_manager
 
       void flush_all(bool keep_dirty = false)
       {
-         for (int i = psp_s0; i < psp_s4; i ++)
+         for (int k = 0; k < SRA_REG_COUNT; k ++)
          {
-            //if (is_usable(i))
-            {
-               flush((psp_gpr_t)i, keep_dirty);
-            }
+            flush(SRA_REGS[k], keep_dirty);
          }
       }
 

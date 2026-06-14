@@ -16,6 +16,10 @@
 #include <strings.h> // Provides strcasecmp
 #include "PSPDisplay.h"
 
+// JIT-vs-interpreter differential test (source/jit_difftest.cpp), run from the
+// ROM-selection menu via TRIANGLE.
+extern "C" void jit_difftest_run_force();
+
 //---------------------------------------------------------------------
 // SETTINGS structure: Holds a name, a description, and an integer value.
 //---------------------------------------------------------------------
@@ -558,6 +562,21 @@ void DSEmuGui(char *path, char *out)
 				oldPad = pad;
 				if (pad.Buttons & PSP_CTRL_HOME)
 					sceKernelExitGame();
+				if (pad.Buttons & PSP_CTRL_TRIANGLE)
+				{
+					// Run the JIT-vs-interpreter differential test over every
+					// instruction, then wait for X to return to the ROM list.
+					pspDebugScreenClear();
+					pspDebugScreenSetXY(0, 0);
+					jit_difftest_run_force();
+					pspDebugScreenPrintf("\n  Press X to return.\n");
+					SceCtrlData wpad;
+					do { sceCtrlPeekBufferPositive(&wpad, 1); sceKernelDelayThread(50000); }
+					while (!(wpad.Buttons & PSP_CTRL_CROSS));
+					pspDebugScreenClear();
+					oldPad = wpad;
+					continue;
+				}
 				if (pad.Buttons & PSP_CTRL_CROSS)
 				{
 					sprintf(out, "%s/%s", tmp, filelist.fname[selpos].name);

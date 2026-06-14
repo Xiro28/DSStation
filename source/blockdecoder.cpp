@@ -133,39 +133,58 @@ std::function<void(psp_gpr_t src, psp_gpr_t dst, opcode &op)> arm_preop[] = {
     [](psp_gpr_t src, psp_gpr_t dst, opcode &op) -> void { // PRE_OP_ROR_IMM
         if (op.imm == 0)
         {
+            // RRX: dst = (C << 31) | (src >> 1). Read the carry straight from the
+            // CPSR byte in the CPU struct so we don't depend on psp_gp having
+            // been loaded (non-S/unconditional ALU ops don't load flags).
             emit_srl(dst, src, 1);
-            emit_ext(psp_t1, psp_gp, _flag_C8, _flag_C8);
+            emit_lbu(psp_t1, RCPU, _flags + 3);       // CPSR top byte (NZCV at 7..4)
+            emit_ext(psp_t1, psp_t1, _flag_C8, _flag_C8);  // isolate C (bit 5)
             emit_ins(dst, psp_t1, 31, 31);
-            set_flag_dirty() return;
+            return;
         }
 
         emit_rotr(dst, src, op.imm);
     },
     [](psp_gpr_t src, psp_gpr_t dst, opcode &op) -> void { // PRE_OP_LSL_REG
-        // printf("PRE_OP_LSL_IMM %d \n", op.imm);
+        // ARM: amount = Rs & 0xFF; if amount >= 32 result is 0 (MIPS sllv only
+        // uses low 5 bits, so we must zero the result for amount >= 32).
+        // NOTE: dst is often psp_at, so amount/compare must use OTHER scratch.
         int32_t regs[1] = {op.imm};
         regman.get(1, regs);
-        emit_sllv(dst, src, regs[0]);
+        emit_andi(psp_v0, (psp_gpr_t)regs[0], 0xFF);   // v0 = amt8
+        emit_sllv(dst, src, psp_v0);                   // src << (amt8 & 31)
+        emit_sltiu(psp_v1, psp_v0, 32);                // v1 = (amt8 < 32)
+        emit_movz(dst, psp_zero, psp_v1);              // amt8 >= 32 -> 0
     },
 
     [](psp_gpr_t src, psp_gpr_t dst, opcode &op) -> void { // PRE_OP_LSR_REG
-        // printf("PRE_OP_LSR_IMM %d \n", op.imm);
+        // ARM: amount = Rs & 0xFF; if amount >= 32 result is 0.
         int32_t regs[1] = {op.imm};
         regman.get(1, regs);
-        emit_srlv(dst, src, regs[0]);
+        emit_andi(psp_v0, (psp_gpr_t)regs[0], 0xFF);
+        emit_srlv(dst, src, psp_v0);
+        emit_sltiu(psp_v1, psp_v0, 32);
+        emit_movz(dst, psp_zero, psp_v1);              // amt8 >= 32 -> 0
     },
 
     [](psp_gpr_t src, psp_gpr_t dst, opcode &op) -> void { // PRE_OP_ASR_REG
-        // printf("PRE_OP_LSR_IMM %d \n", op.imm);
+        // ARM: amount = Rs & 0xFF; if amount >= 32 result is sign-extension
+        // (src >> 31, arithmetic). MIPS srav masks to 5 bits, so clamp.
         int32_t regs[1] = {op.imm};
         regman.get(1, regs);
-        emit_srav(dst, src, regs[0]);
+        emit_andi(psp_v0, (psp_gpr_t)regs[0], 0xFF);   // v0 = amt8
+        emit_srav(dst, src, psp_v0);                   // src >>a (amt8 & 31)
+        emit_sra(psp_v1, src, 31);                     // sign fill
+        emit_sltiu(psp_v0, psp_v0, 32);                // v0 = (amt8 < 32)
+        emit_movz(dst, psp_v1, psp_v0);                // amt8 >= 32 -> sign fill
     },
 
     [](psp_gpr_t src, psp_gpr_t dst, opcode &op) -> void { // PRE_OP_ROR_REG
+        // ARM: amount = Rs & 0xFF; rotate uses amount & 31. MIPS rotrv masks to
+        // 5 bits, which matches ARM exactly (ROR by a multiple of 32 = no-op).
         int32_t regs[1] = {op.imm};
         regman.get(1, regs);
-        emit_rotrv(dst, src, regs[0]);
+        emit_rotrv(dst, src, (psp_gpr_t)regs[0]);
     },
 };
 
@@ -323,16 +342,18 @@ INLINE void emit_bici(u32 dst, u32 a0, u32 a1)
     emit_andi(dst, a0, ~a1);
 }
 
-#define END_OP(_rd)                        \
-    {                                      \
-        regman.mark_dirty((psp_gpr_t)_rd); \
-        if (!rd_allocated)                 \
-            regman.flush((psp_gpr_t)_rd);  \
+#define END_OP(_rd)                               \
+    {                                             \
+        if (!op.dead_rd)                          \
+            regman.mark_dirty((psp_gpr_t)_rd);    \
+        if (!rd_allocated && !op.dead_rd)         \
+            regman.flush((psp_gpr_t)_rd);         \
     }
 
 #define END_OP_CHKR15(_rd)                                 \
     {                                                      \
-        regman.mark_dirty((psp_gpr_t)_rd);                 \
+        if (!op.dead_rd)                                   \
+            regman.mark_dirty((psp_gpr_t)_rd);             \
         if (op.rd == 15)                                   \
         {                                                  \
             op.check_condition = false;                    \
@@ -424,30 +445,195 @@ gen_nativeOP(add, addu, addiu, s);
 gen_nativeOP(sub, subu, subiu, s);
 gen_nativeOP(bic, bic, bici, u);
 
+// Apply an IMM-shift to a compile-time constant.
+// Returns false for RRX (shift=0 ROR), which needs the carry flag at runtime.
+static bool apply_const_shift(opType preOp, uint32_t src, uint32_t shift, uint32_t &out)
+{
+    switch (preOp) {
+    case PRE_OP_LSL_IMM:
+        out = src << shift;
+        return true;
+    case PRE_OP_LSR_IMM:
+        out = shift ? (src >> shift) : 0u;
+        return true;
+    case PRE_OP_ASR_IMM:
+        out = (uint32_t)((int32_t)src >> (shift ? shift : 31));
+        return true;
+    case PRE_OP_ROR_IMM:
+        if (!shift) return false; // RRX — depends on carry
+        out = (src >> shift) | (src << (32u - shift));
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Evaluate a binary IR opcode with two known constants.
+// lhs = consts[rs1], rhs = op.imm.
+// Returns false for ops whose result can't be folded (flag-setters, mem, etc.).
+static bool eval_const_binop(op _op, uint32_t lhs, uint32_t rhs, uint32_t &out)
+{
+    switch (_op) {
+    case OP_ADD: out = lhs + rhs;  return true;
+    case OP_SUB: out = lhs - rhs;  return true;
+    case OP_RSB: out = rhs - lhs;  return true; // RSB: rd = imm - rs1
+    case OP_AND: out = lhs & rhs;  return true;
+    case OP_ORR: out = lhs | rhs;  return true;
+    case OP_EOR: out = lhs ^ rhs;  return true;
+    case OP_BIC: out = lhs & ~rhs; return true;
+    default:     return false;
+    }
+}
+
 // Do you want speed? call this function if you want to see some black magic :D
 
 void block::optimize_basicblock()
 {
-
-    // Now useless since it behaved like a SRA but without actually allocating the registers
-    // Maybe we can use it for something else (like removing useless operations)
-
-    // Check if we can merge togheter a conditional check with 2 or more opcodes
-    // Example:
-    // moveq r0, #0
-    // moveq r1, #0
-    // They both rely on the same condition (eq), so we can merge them togheter and do the check just once
-    // However we can do this only the opcode that support the branchless check
-    opcode *prev_op = 0;
-
-    for (opcode &op : opcodes)
+    // === Pass 1: Condition merging ===
+    // Consecutive ops with the same condition can skip re-evaluating the flags.
     {
-        if (prev_op && prev_op->_op != OP_ITP && op.condition == prev_op->condition)
-            op.check_condition = false;
-        prev_op = &op;
+        opcode *prev = nullptr;
+        for (opcode &op : opcodes) {
+            if (prev && prev->_op != OP_ITP && op.condition == prev->condition)
+                op.check_condition = false;
+            prev = &op;
+        }
     }
 
-    prev_op = 0;
+    // === Pass 2: Constant propagation ===
+    // Forward pass: track registers whose values are compile-time constants and
+    // fold arithmetic/shift expressions into immediate MOVs where possible.
+    // Toggle: set to 0 to disable. Steps A/B are now guarded to ALU ops only —
+    // previously they rewrote memory ops, dropping GX-FIFO stores (3D vanished).
+    #define JIT_ENABLE_CONSTPROP 1
+    if (JIT_ENABLE_CONSTPROP)
+    {
+        struct ConstVal { bool known; uint32_t val; };
+        ConstVal consts[16] = {};
+
+        for (opcode &op : opcodes)
+        {
+            // ITP is an interpreted instruction — it can read/write any register.
+            if (op._op == OP_ITP) {
+                memset(consts, 0, sizeof(consts));
+                continue;
+            }
+
+            // LDM defines every register in its list; STM only its writeback base.
+            // Invalidate all written regs so later folds don't use stale constants.
+            if (op._op == OP_LDM || op._op == OP_STM) {
+                if (op._op == OP_LDM) {
+                    const uint16_t rlist = op.bytes & 0xFFFF;
+                    for (int r = 0; r < 16; r++)
+                        if (rlist & (1u << r)) consts[r].known = false;
+                }
+                if (op.rs1 >= 0 && op.rs1 < 16) consts[op.rs1].known = false; // writeback base
+                continue;
+            }
+
+            const bool unconditional = (op.condition == (uint32_t)-1);
+
+            // Folding (Steps A/B) is only valid for pure ALU ops. For memory ops
+            // (OP_LDR/OP_STR/OP_LDM/...) preOpType encodes the ADDRESSING MODE and
+            // op.imm is the offset, NOT an ALU operand — rewriting them corrupts
+            // the access (and Step B would turn a store into a MOV, dropping it:
+            // that silently kills GX-FIFO / 3D stores). ALU opcodes are the range
+            // (OP_ITP, OP_LDR); compare/etc. (>= OP_CMP) also excluded.
+            const bool is_alu_op = (op._op > OP_ITP && op._op < OP_LDR);
+
+            // Step A: rs2 is const + IMM shift → fold the shift into an immediate.
+            // e.g. "ADD rd, rn, rm LSL #n" → "ADD rd, rn, #(rm_val << n)"
+            if (is_alu_op &&
+                (op.preOpType == PRE_OP_LSL_IMM || op.preOpType == PRE_OP_LSR_IMM ||
+                 op.preOpType == PRE_OP_ASR_IMM || op.preOpType == PRE_OP_ROR_IMM) &&
+                op.rs2 >= 0 && op.rs2 < 16 && consts[op.rs2].known)
+            {
+                uint32_t shifted;
+                if (apply_const_shift(op.preOpType, consts[op.rs2].val, (uint32_t)op.imm, shifted)) {
+                    op.preOpType = PRE_OP_IMM;
+                    op.imm       = (int32_t)shifted;
+                    op.rs2       = -1;
+                }
+            }
+
+            // Step B: rs1 is const + PRE_OP_IMM → fold to a pure MOV #imm.
+            // e.g. "ADD rd, rn, #k" where rn==const → "MOV rd, #(rn_val + k)"
+            // Only safe for unconditional ALU ops (never memory ops).
+            if (is_alu_op &&
+                unconditional &&
+                op.preOpType == PRE_OP_IMM &&
+                op._op != OP_MOV &&
+                op.rs1 >= 0 && op.rs1 < 16 && consts[op.rs1].known)
+            {
+                uint32_t folded;
+                if (eval_const_binop(op._op, consts[op.rs1].val, (uint32_t)op.imm, folded)) {
+                    op._op  = OP_MOV;
+                    op.imm  = (int32_t)folded;
+                    op.rs1  = -1;
+                    // preOpType stays PRE_OP_IMM — the emitter emits "li rd, folded"
+                }
+            }
+
+            // Step C: update const table for the destination register.
+            if (op.rd >= 0 && op.rd < 15) { // never track r15 (PC)
+                consts[op.rd].known = false;  // pessimistically invalidate first
+
+                // Only a plain unconditional MOV #imm produces a known compile-time value.
+                if (unconditional && op._op == OP_MOV && op.preOpType == PRE_OP_IMM) {
+                    consts[op.rd] = {true, (uint32_t)op.imm};
+                }
+            }
+        }
+    }
+
+    // === Pass 3: Dead store elimination ===
+    // Backward liveness pass: if rd is overwritten before any subsequent read,
+    // the writeback to RCPU is dead — suppress mark_dirty so flush emits no sw.
+    // Conservative: all regs are live at block exit (next block may read anything).
+    // We can only catch intra-block kills (reg written twice without a read between).
+    {
+        uint16_t live = 0xFFFF; // bits 0-15: live ARM registers
+
+        for (int i = (int)opcodes.size() - 1; i >= 0; --i) {
+            opcode &op = opcodes[i];
+
+            if (op._op == OP_ITP) {
+                live = 0xFFFF; // interpreted instr: conservatively uses everything
+                continue;
+            }
+
+            if (op._op == OP_LDM || op._op == OP_STM) {
+                const uint16_t rlist = op.bytes & 0xFFFF;
+                if (op._op == OP_LDM) live &= ~rlist;   // loaded regs are defined
+                else                  live |= rlist;     // stored regs are used
+                if (op.rs1 >= 0 && op.rs1 < 16) live |= (1u << op.rs1); // base
+                continue;
+            }
+
+            const bool unconditional = (op.condition == (uint32_t)-1);
+
+            // Only pure ALU ops (no memory side-effects) can be dead-stored.
+            const bool is_alu = (op._op > OP_ITP && op._op < OP_LDR);
+
+            if (is_alu && unconditional && op.rd < 15 && op.rd >= 0) {
+                if (!(live & (1u << op.rd))) {
+                    op.dead_rd = true; // nobody reads this value before it's overwritten
+                }
+                // Definition kills liveness regardless of whether it's dead.
+                live &= ~(1u << op.rd);
+            }
+
+            // Mark sources as live.
+            if (op.rs1 >= 0 && op.rs1 < 16) live |= (1u << op.rs1);
+            if (op.rs2 >= 0 && op.rs2 < 16) live |= (1u << op.rs2);
+            // REG-shift and MLA: shift-amount / accumulator register lives in imm field.
+            if (op.preOpType == PRE_OP_LSL_REG || op.preOpType == PRE_OP_LSR_REG ||
+                op.preOpType == PRE_OP_ASR_REG || op.preOpType == PRE_OP_ROR_REG ||
+                op._op == OP_MLA || op._op == OP_UMLA) {
+                if (op.imm >= 0 && op.imm < 16) live |= (1u << op.imm);
+            }
+        }
+    }
 
     return;
 }
@@ -559,6 +745,42 @@ void block::optimize_basicblockThumb()
             }
         }
     } */
+
+    // Dead store elimination (same pass as ARM mode).
+    {
+        uint16_t live = 0xFFFF;
+
+        for (int i = (int)opcodes.size() - 1; i >= 0; --i) {
+            opcode &op = opcodes[i];
+
+            if (op._op == OP_ITP) { live = 0xFFFF; continue; }
+
+            if (op._op == OP_LDM || op._op == OP_STM) {
+                const uint16_t rlist = op.bytes & 0xFFFF;
+                if (op._op == OP_LDM) live &= ~rlist;   // loaded regs are defined
+                else                  live |= rlist;     // stored regs are used
+                if (op.rs1 >= 0 && op.rs1 < 16) live |= (1u << op.rs1); // base
+                continue;
+            }
+
+            const bool unconditional = (op.condition == (uint32_t)-1);
+            const bool is_alu = (op._op > OP_ITP && op._op < OP_LDR);
+
+            if (is_alu && unconditional && op.rd < 15 && op.rd >= 0) {
+                if (!(live & (1u << op.rd)))
+                    op.dead_rd = true;
+                live &= ~(1u << op.rd);
+            }
+
+            if (op.rs1 >= 0 && op.rs1 < 16) live |= (1u << op.rs1);
+            if (op.rs2 >= 0 && op.rs2 < 16) live |= (1u << op.rs2);
+            if (op.preOpType == PRE_OP_LSL_REG || op.preOpType == PRE_OP_LSR_REG ||
+                op.preOpType == PRE_OP_ASR_REG || op.preOpType == PRE_OP_ROR_REG ||
+                op._op == OP_MLA || op._op == OP_UMLA) {
+                if (op.imm >= 0 && op.imm < 16) live |= (1u << op.imm);
+            }
+        }
+    }
 }
 
 extern "C" void set_sub_flags();
@@ -1202,12 +1424,16 @@ void emitARMOP(opcode &op, const bool last_op)
 
         check_flags()
 
-            emit_movi(psp_v0, 1);
         conditional(
+            // R[14] = next_instruction (return address)
+            emit_lw(psp_at, RCPU, _next_instr);
+            emit_sw(psp_at, RCPU, _reg(14));
+            // next_instruction = R[15] + off (branch target); ARM targets are always word-aligned
+            emit_lw(psp_at, RCPU, _R15);
             emit_li(psp_a0, op.imm);
-            u32 op = emit_SlideDelay();
-            emit_jal(jump_to_linked_blc<true>);
-            emit_Write32(op);)
+            emit_addu(psp_a0, psp_a0, psp_at);
+            emit_sw(psp_a0, RCPU, _R15);
+            emit_sw(psp_a0, RCPU, _next_instr);)
     }
     break;
 
@@ -1556,6 +1782,82 @@ void emitARMOP(opcode &op, const bool last_op)
                     regman.map(op.rd, (psp_gpr_t)regs[0]);
                     regman.mark_dirty((psp_gpr_t)regs[0]);
                 } else storeReg((psp_gpr_t)regs[0], op.rd);)
+    }
+    break;
+
+    case OP_LDM:
+    case OP_STM:
+    {
+        // op.bytes = full ARM opcode. Decode addressing form here.
+        const u32 insn   = op.bytes;
+        const bool load  = (op._op == OP_LDM);
+        const bool P     = (insn >> 24) & 1;   // pre/post
+        const bool U     = (insn >> 23) & 1;   // up/down
+        const bool W     = (insn >> 21) & 1;   // writeback
+        const u32  rlist = insn & 0xFFFF;
+        const u32  rn    = op.rs1;
+
+        int n = 0;
+        for (u32 b = 0; b < 16; b++)
+            if (rlist & (1u << b)) n++;
+
+        // psp_s5 holds the running effective address across the memory calls
+        // (callee-saved, survives _read32/_write32). All NDS regs live in the
+        // CPU struct here (flushed below), so we load/store them directly.
+        regman.flush_all(false);
+        regman.reset();
+
+        check_flags()
+
+        conditional(
+            // base address into s5
+            loadReg(psp_s5, rn);
+
+            // Lowest register goes to lowest address. Compute address of the
+            // lowest-numbered register's slot, then walk upward by +4.
+            // IA: base ; IB: base+4 ; DA: base-(n-1)*4 ; DB: base-n*4
+            int first_off;
+            if (U)  first_off = P ? 4 : 0;
+            else    first_off = P ? -(n * 4) : -((n - 1) * 4);
+
+            if (first_off != 0)
+                emit_addiu(psp_s5, psp_s5, first_off);
+
+            // Writeback value computed up front (before any load can clobber rn).
+            // n*4 <= 64, fits a signed 16-bit addiu immediate.
+            if (W) {
+                loadReg(psp_s7, rn);
+                emit_addiu(psp_s7, psp_s7, U ? (n * 4) : -(n * 4));
+                storeReg(psp_s7, rn);
+            }
+
+            int idx = 0;
+            for (u32 b = 0; b < 16; b++) {
+                if (!(rlist & (1u << b))) continue;
+
+                if (load) {
+                    // Mirror OP_LDR's proven read sequence (rotate is a no-op when aligned).
+                    // Rotate amount must survive the call → use callee-saved s6.
+                    emit_sll(psp_s6, psp_s5, 3);          // rotate amount = (addr&3)*8
+                    emit_move(psp_a0, psp_s5);
+                    emit_jal(_MMU_read32<PROCNUM>);
+                    emit_ins(psp_a0, psp_zero, 1, 0);     // word-align addr (delay slot)
+                    emit_rotrv(psp_v0, psp_v0, psp_s6);
+                    storeReg(psp_v0, b);
+                } else {
+                    emit_move(psp_a0, psp_s5);
+                    loadReg(psp_a1, b);
+                    emit_jal(_write32);
+                    emit_ins(psp_a0, psp_zero, 1, 0);     // word-align addr (delay slot)
+                }
+
+                idx++;
+                if (idx < n)
+                    emit_addiu(psp_s5, psp_s5, 4);
+            }
+
+            regman.reset();
+        )
     }
     break;
 

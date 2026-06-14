@@ -150,11 +150,11 @@ bool menu_quit = false;
 void MenuAction(){
 	switch(curr_index){
 		case 1:
-			ChangeRom(true); 
+			ChangeRom(true);
 		break;
-		
+
 		case 2:
-			ResetRom(); 
+			ResetRom();
 		break;
 
 		case 3:
@@ -275,7 +275,7 @@ process_ctrls_event(u16 &keypad)
 	  set_mouse_coord(mouse.x, mouse.y);
 
 	  const bool select_combo = (pad.Buttons & PSP_CTRL_HOME) && (pad.Buttons & PSP_CTRL_SELECT);
-	
+
 	  if (pad.Buttons & PSP_CTRL_HOME && !select_combo) {
 		Menu();
 	  }	else if (pad.Buttons & PSP_CTRL_SELECT) {
