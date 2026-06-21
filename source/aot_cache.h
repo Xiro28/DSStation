@@ -15,7 +15,7 @@
 // cache-internal jumps from calls to fixed runtime helpers.
 
 #define AOT_MAGIC   0x544F4144u  // "DAOT"
-#define AOT_VERSION 4u            // bumped: SRA cache 7 regs + LDM/STM JIT codegen
+#define AOT_VERSION 54u           // bumped: cycles-in-register ($s3) reintroduced behind JIT_CYCLES_IN_REG
 
 struct AOTFileHeader {
     u32 magic;
@@ -59,5 +59,8 @@ void aot_precompile(void);
 // True while aot_precompile() is running.
 // arm_jit_compile() checks this to skip executing NitroSDK HLE stubs.
 extern bool aot_precompiling;
+
+// Re-register AOT blocks into the JIT table after arm_jit_reset clears it.
+void aot_reregister(void);
 
 #endif // AOT_CACHE_H

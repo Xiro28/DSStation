@@ -20,6 +20,11 @@
 #ifndef MMU_H
 #define MMU_H
 
+// Master toggle for the manual zone profiler / interpreter-fallback histogram /
+// timing logs scattered across NDSSystem.cpp, exec_cpu, exec_hw, gfx3d.cpp,
+// blockdecoder.cpp (OP_ITP) and arm_jit.cpp. Set to 1 to re-enable profiling.
+#define PROFILER_ENABLED 0
+
 #include "debug.h"
 #include "firmware.h"
 #include "mc.h"

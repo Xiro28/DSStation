@@ -438,6 +438,34 @@ VERTLIST* vertlists = NULL;
 VERTLIST* vertlist = NULL;
 int			polygonListCompleted = 0;
 
+// ---- Per-frame modelview matrix pool (for PSP GU hardware transform) ----
+// SetVertex() snapshots the active modelview (mtxCurrent[0]) into this pool,
+// deduping consecutive identical matrices, and stamps each completed POLY with
+// its mtxId. The PSP renderer groups draws by mtxId and uploads each matrix to
+// the GU once (sceGuSetMatrix(GU_MODEL)), so the GU does the modelview*proj
+// transform in hardware. This is the "context store / recycle" path.
+CACHE_ALIGN float mtxPool[MTXPOOL_SIZE][16];
+int               mtxPoolCount = 0;
+static u16        currentMtxId = 0;
+
+// Snapshot of the active DS texture matrix (mtxCurrent[3]) for tex-coord
+// transform mode 1, offloaded to the PSP GU texture matrix. One per frame is
+// the common case; texMtxValid says whether mode-1 UVs were seen this frame.
+CACHE_ALIGN float texMtxCurrent[16];
+bool              texMtxValid = false;
+
+static u16 mtxPool_intern(const float* m)
+{
+	// Fast path: same as the last interned matrix (the common case — modelview
+	// changes far less often than per-vertex).
+	if (mtxPoolCount > 0 && memcmp(mtxPool[mtxPoolCount - 1], m, 16 * sizeof(float)) == 0)
+		return (u16)(mtxPoolCount - 1);
+	if (mtxPoolCount >= MTXPOOL_SIZE)
+		return (u16)(mtxPoolCount - 1); // pool full: reuse last, avoid overflow
+	memcpy(mtxPool[mtxPoolCount], m, 16 * sizeof(float));
+	return (u16)(mtxPoolCount++);
+}
+
 int listTwiddle = 1;
 int triStripToggle;
 
@@ -459,6 +487,9 @@ static void twiddleLists() {
 	vertlist = &vertlists[listTwiddle];
 	polylist->count = 0;
 	vertlist->count = 0;
+	mtxPoolCount = 0;
+	currentMtxId = 0;
+	texMtxValid = false;
 }
 
 static BOOL flushPending = FALSE;
@@ -779,6 +810,11 @@ static void SetVertex()
 	//so that we only have to multiply one matrix here
 	//(we could lazy cache the concatenated clip matrix and only generate it
 	//when we need to)
+	// Snapshot the active modelview into the pool BEFORE transforming, so the GU
+	// can re-apply it in hardware. mtxCurrent[0]=projection, [1]=modelview in
+	// DeSmuME's matrix-mode numbering. currentMtxId is stamped onto the poly below.
+	currentMtxId = mtxPool_intern(mtxCurrent[1]);
+
 	MatrixMultVec4x4_M2(mtxCurrent[0], coordTransformed);
 
 	//TODO - culling should be done here.
@@ -801,6 +837,12 @@ static void SetVertex()
 	vert.coord[1] = coordTransformed[1];
 	vert.coord[2] = coordTransformed[2];
 	vert.coord[3] = coordTransformed[3];
+
+	// Object-space coords for the GU hardware transform path.
+	vert.rawcoord[0] = coord[0];
+	vert.rawcoord[1] = coord[1];
+	vert.rawcoord[2] = coord[2];
+	vert.rawcoord[3] = 1.0f;
 	
 	vert.color[0] = (colorRGB[0]);
 	vert.color[1] = (colorRGB[1]);
@@ -920,6 +962,7 @@ static void SetVertex()
 			poly.texParam = textureFormat;
 			poly.texPalette = texturePalette;
 			poly.viewport = viewport;
+			poly.mtxId = currentMtxId;
 			polylist->count++;
 		}
 	}
@@ -1421,31 +1464,13 @@ static void gfx3d_glTexCoord(u32 val)
 
 	if (texCoordinateTransform == 1)
 	{
-		//printf("glTextcord\n");
-		__asm__ volatile (
-
-			"lv.s S000,  %1\n"
-			"lv.s S001,  %2\n"
-			"vfim.s S002, 0.0625\n"
-
-			"vscl.p C000, C000, S002\n"
-
-			"sv.s S000, %1\n"
-			"sv.s S001, %2\n"
-
-			"lv.q C100,  0 + %3\n"
-
-			"vmul.q C100, C000, C100\n"
-			"vfad.q S100, C100\n"
-			"sv.s S100, %0\n"
-
-			: "=m"(last_s), "+m"(_s), "+m"(_t): "m"(mtxCurrent[3][0])
-		);
-
-			/*last_s = _s * mtxCurrent[3][0] + _t * mtxCurrent[3][4] +
-				0.0625f * mtxCurrent[3][8] + 0.0625f * mtxCurrent[3][12];*/
-			last_t = _s * mtxCurrent[3][1] + _t * mtxCurrent[3][5] +
-				0.0625f * mtxCurrent[3][9] + 0.0625f * mtxCurrent[3][13];
+		// CPU tex-coord transform (mode 1): last_s/t = (s,t)/16 * mtxCurrent[3].
+		const float s = _s * 0.0625f;
+		const float t = _t * 0.0625f;
+		last_s = s * mtxCurrent[3][0] + t * mtxCurrent[3][4] +
+		         0.0625f * mtxCurrent[3][8] + 0.0625f * mtxCurrent[3][12];
+		last_t = s * mtxCurrent[3][1] + t * mtxCurrent[3][5] +
+		         0.0625f * mtxCurrent[3][9] + 0.0625f * mtxCurrent[3][13];
 	}
 	else
 	{
@@ -2436,7 +2461,7 @@ static inline bool gfx3d_zsort_compare(int num1, int num2)
 	const POLY& poly2 = polylist->list[num2];
 	
 	// Disegna PRIMA i poligoni più lontani (Back-to-Front)
-	return poly1.maxz > poly2.maxz;
+	return std::abs(poly1.maxz) > std::abs(poly2.maxz);
 }
 
 static bool gfx3d_ysort_compare(int num1, int num2)
@@ -2495,43 +2520,64 @@ static void gfx3d_doFlush()
 	const int polycount = polylist->count;
 
 
-for (size_t i = 0; i < polycount; i++)
+	// frameAllOrtho: all vertices w==1 (pure 2D-ortho UI frame). Used only by the
+	// opt-in "sort_3d" path for the |z| heuristic.
+	bool frameAllOrtho = true;
+
+	for (size_t i = 0; i < polycount; i++)
 	{
 		POLY &poly = polylist->list[i];
-		float furthest_z = 0.0f;
-		
+		float furthest_z = -1e28f;  // signed max z/w (back-to-front key)
+		float maxAbsZ    = 0.0f;    // max |z/w| (foreground-distance key for ortho UI)
+
 		for (size_t j = 0; j < poly.type; j++) {
 			float vw = vertlist->list[poly.vertIndexes[j]].w;
 			float vz = vertlist->list[poly.vertIndexes[j]].z;
-			
+
+			if (fabsf(vw - 1.0f) > 1e-3f) frameAllOrtho = false;
+
 			float current_z = 0.0f;
 			if (gfx3d.state.wbuffer) {
-				current_z = vw; // Usa W-buffer se richiesto dal gioco
+				current_z = vw;
 			} else {
 				current_z = (vw != 0.0f) ? (vz / vw) : 0.0f;
 			}
-			
-			// Trova il punto più profondo (lontano) del poligono
-			if (current_z > furthest_z) {
-				furthest_z = current_z;
-			}
+
+			if (current_z > furthest_z) furthest_z = current_z;
+			if (fabsf(current_z) > maxAbsZ) maxAbsZ = fabsf(current_z);
 		}
-		
+
 		poly.maxz = furthest_z;
+		poly.minz = maxAbsZ;
 	}
 
 	size_t ctr = 0;
 	for (size_t i = 0; i < polycount; i++)
 		gfx3d.indexlist.list[ctr++] = i;
 
-	// Eseguiamo un Painter's Algorithm per tutta la scena
-	//if (my_config.sort_3d)
-	{
+	if (my_config.sort_3d) {
+		// Opt-in "3D UI depth fix": opaque first, then translucent; for pure 2D-ortho
+		// UI frames order by |z| ascending (background plane first) so coplanar menus
+		// (e.g. Tetris DS) layer correctly. Wrong for some games, hence opt-in.
+		const bool useOrthoZ = frameAllOrtho;
+		std::stable_sort(gfx3d.indexlist.list,
+						 gfx3d.indexlist.list + polycount,
+						 [useOrthoZ](int num1, int num2) {
+							u32 a1 = (polylist->list[num1].polyAttr >> 16) & 0x1F;
+							u32 a2 = (polylist->list[num2].polyAttr >> 16) & 0x1F;
+							bool t1 = (a1 < 31), t2 = (a2 < 31);
+							if (t1 != t2) return !t1;        // opaque before translucent
+							float z1 = useOrthoZ ? polylist->list[num1].minz : polylist->list[num1].maxz;
+							float z2 = useOrthoZ ? polylist->list[num2].minz : polylist->list[num2].maxz;
+							if (z1 != z2) return z1 < z2;    // background/far first
+							return false;                    // tie: submission order (stable)
+						 });
+	} else {
+		// Default painter's: back-to-front (largest maxz first). Pokemon-safe.
 		std::stable_sort(gfx3d.indexlist.list,
 						 gfx3d.indexlist.list + polycount,
 						 [](int num1, int num2) {
-							 // Back-to-Front: il poligono con il vertice più lontano viene disegnato per primo
-							 return polylist->list[num1].maxz > polylist->list[num2].maxz;
+							return polylist->list[num1].maxz > polylist->list[num2].maxz;
 						 });
 	}
 /*
@@ -2565,12 +2611,23 @@ for (size_t i = 0; i < polycount; i++)
 	drawPending = TRUE;
 }
 
+#if PROFILER_ENABLED
+extern u32 g_prof_gfx3d_us;
+extern "C" unsigned int prof_us(void);
+#endif
+
 void gfx3d_VBlankSignal()
 {
 	if (isSwapBuffers)
 	{
 		#ifndef FLUSHMODE_HACK
+		#if PROFILER_ENABLED
+			const u32 _pf = prof_us();
 			gfx3d_doFlush();
+			g_prof_gfx3d_us += prof_us() - _pf;
+		#else
+			gfx3d_doFlush();
+		#endif
 		#endif
 
 		GFX_DELAY(392);

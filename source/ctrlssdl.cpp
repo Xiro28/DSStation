@@ -29,10 +29,12 @@
 #include <pspctrl.h>
 #include <pspdisplay.h>
 #include <pspkernel.h>
+#include <pspdebug.h>
+#include <psppower.h>
 
 #include "armcpu.h"
-
 #include "GPU.h"
+#include "PSP/PSPDisplay.h"
 
 #define NB_KEYS 12
 
@@ -141,7 +143,7 @@ typedef struct{
 	int var;
 }option;
 
-option Options[] = {{"Resume",-1},{"Change Rom",-1},{"Reset Rom",-1},{"Save State",-1},{"Load State",-1},{"Emu Config",-1},{"Exit",-1}};
+option Options[] = {{"Resume",-1},{"Change Rom",-1},{"Reset Rom",-1},{"Save State",-1},{"Load State",-1},{"Rom Settings",-1},{"Exit",-1}};
 
 u8 curr_index = 0;
 u8 N_options = 7;
@@ -166,7 +168,10 @@ void MenuAction(){
 		break;
 
 		case 5:
-			EMU_Conf();
+		{
+			extern void RomSettingsMenu();
+			RomSettingsMenu();
+		}
 		break;
 
 		case 6:
@@ -178,63 +183,30 @@ void MenuAction(){
 	menu_quit = true;
 }
 
-void MenuOption(){
-	pspDebugScreenSetXY(0, 3);
-
-	for(u8 i = 0;i < N_options;i++){
-		pspDebugScreenSetTextColor(0xffffffff);
-
-		if (i == curr_index)
-			pspDebugScreenSetTextColor(0x0000ffff);
-
-	    if (Options[i].var == -1)
-			pspDebugScreenPrintf("  %s \n",Options[i].name);
-		else
-			pspDebugScreenPrintf("  %s :  %d\n",Options[i].name,Options[i].var);
-	}
-
-	pspDebugScreenSetTextColor(0xffffffff);
-	
-}
-
-void Menu(){	
-	SceCtrlData pad,oldPad;
+void Menu(){
+	SceCtrlData pad, oldPad = {0};
 	menu_quit = false;
 	curr_index = 0;
 
-	pspDebugScreenClear();
+	while (!menu_quit) {
+		DrawPauseMenu(curr_index);
 
-	while(!menu_quit){
-	
-	sceDisplayWaitVblankStart();
-	MenuOption();
-
-	if(sceCtrlPeekBufferPositive(&pad, 1))
-		{
-			if (pad.Buttons != oldPad.Buttons)
-			{
-				if (pad.Buttons & PSP_CTRL_UP){
-					--curr_index;
-					if (curr_index < 0) curr_index = 0;
-				}
-				if (pad.Buttons & PSP_CTRL_DOWN){
+		if (sceCtrlPeekBufferPositive(&pad, 1)) {
+			if (pad.Buttons != oldPad.Buttons) {
+				if (pad.Buttons & PSP_CTRL_UP)
+					curr_index = (curr_index == 0) ? (N_options - 1) : (curr_index - 1);
+				if (pad.Buttons & PSP_CTRL_DOWN) {
 					++curr_index;
-					if (curr_index > N_options-1) curr_index = 0;
+					if (curr_index > N_options - 1) curr_index = 0;
 				}
-				if (pad.Buttons & PSP_CTRL_CROSS){
+				if (pad.Buttons & PSP_CTRL_CROSS)
 					MenuAction();
-				}
-				 if (pad.Buttons & PSP_CTRL_CIRCLE){
-					 pspDebugScreenClear();
+				if (pad.Buttons & PSP_CTRL_CIRCLE)
 					return;
-	  			}
 			}
-
 			oldPad = pad;
 		}
 	}
-
-	pspDebugScreenClear();
 }
 
 extern bool ARM7_SKIP_HACK;
@@ -252,25 +224,22 @@ process_ctrls_event(u16 &keypad)
 
 	  mouse.click = FALSE;
 
-	  if (pad.Lx < 10) {
-		  --mouse.x; --mouse.x;
-		  --mouse.x; --mouse.x;
-	  }
+	  // Wrap around the DS touch screen (256x192): going past an edge makes the
+	  // cursor reappear on the opposite side. Compute in int and use a positive
+	  // modulo so negative values wrap correctly (C's % keeps the sign).
+	  int mx = mouse.x;
+	  int my = mouse.y;
 
-	  if (pad.Lx > 245) {
-		  ++mouse.x; ++mouse.x;
-		  ++mouse.x; ++mouse.x;
-	  }
+	  if (pad.Lx < 10)  mx -= 4;
+	  if (pad.Lx > 245) mx += 4;
+	  if (pad.Ly < 10)  my -= 4;
+	  if (pad.Ly > 245) my += 4;
 
-	  if (pad.Ly < 10) {
-		  --mouse.y; --mouse.y;
-		  --mouse.y; --mouse.y;
-	  }
+	  mx = ((mx % 256) + 256) % 256;   // 0..255
+	  my = ((my % 192) + 192) % 192;   // 0..191
 
-	  if (pad.Ly > 245) {
-		  ++mouse.y; ++mouse.y;
-		  ++mouse.y; ++mouse.y;
-	  }
+	  mouse.x = (u8)mx;
+	  mouse.y = (u8)my;
 
 	  set_mouse_coord(mouse.x, mouse.y);
 

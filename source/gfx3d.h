@@ -277,6 +277,7 @@ struct POLY {
 	u32 polyAttr, texParam, texPalette; //the hardware rendering params
 	bool backfacing;
 	u32 viewport;
+	u16 mtxId; // index into the per-frame modelview matrix pool (gfx3d)
 	float miny, maxy;
 	float minz, maxz;
 
@@ -553,6 +554,11 @@ struct VERT {
 			float x,y,z,w;
 		};
 	} CACHE_ALIGN;
+	// Raw object-space coords (pre-modelview). Saved so the PSP GU can do the
+	// modelview*projection transform in hardware (GU_TRANSFORM_3D) instead of us
+	// pre-multiplying on the CPU. coord[] above stays the CPU-transformed value
+	// (still used by lighting / line-segment detection / clip checks).
+	float rawcoord[4] CACHE_ALIGN;
 	union {
 		float texcoord[2];
 		struct {
@@ -757,6 +763,15 @@ extern GFX3D gfx3d;
 //---------------------
 
 extern CACHE_ALIGN float mtxCurrent[4][16];
+
+// Per-frame modelview matrix pool (PSP GU hardware-transform path). See gfx3d.cpp.
+#define MTXPOOL_SIZE 1024
+extern CACHE_ALIGN float mtxPool[MTXPOOL_SIZE][16];
+extern int mtxPoolCount;
+
+// DS texture matrix snapshot (tex-coord transform mode 1, GU-offloaded).
+extern CACHE_ALIGN float texMtxCurrent[16];
+extern bool texMtxValid;
 
 extern CACHE_ALIGN u32 color_15bit_to_24bit[32768];
 extern CACHE_ALIGN u32 color_15bit_to_24bit_reverse[32768];

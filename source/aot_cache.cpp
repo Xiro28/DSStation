@@ -44,7 +44,29 @@ static u8  *s_aot_code_buf  = NULL;
 static u32  s_aot_code_used = 0;
 static u32  s_saved_last_addr = 0;
 
-extern u32 LastAddr;   // defined in mips_code_emiter.cpp
+extern u32 LastAddr;              // defined in mips_code_emiter.cpp
+extern uint32_t interpreted_cycles; // defined in arm_jit.cpp
+
+// ---------------------------------------------------------------
+// Registry of loaded AOT blocks — survives arm_jit_reset JITFREE
+// ---------------------------------------------------------------
+
+#define AOT_LOADED_MAX AOT_MAX_BLOCKS
+
+static uintptr_t s_loaded_ptrs [AOT_LOADED_MAX];
+static u32       s_loaded_arms [AOT_LOADED_MAX];
+static u8        s_loaded_procs[AOT_LOADED_MAX];
+static u32       s_num_loaded = 0;
+
+void aot_reregister(void)
+{
+    for (u32 i = 0; i < s_num_loaded; i++) {
+        JIT_COMPILED_FUNC(s_loaded_arms[i], s_loaded_procs[i]) = s_loaded_ptrs[i];
+        JIT_MarkCodePage(s_loaded_arms[i]);
+    }
+    if (s_num_loaded)
+        printf("AOT: re-registered %lu blocks\n", (unsigned long)s_num_loaded);
+}
 
 static bool aot_buf_ensure(void)
 {
@@ -262,6 +284,11 @@ void aot_close(void)
 
     printf("AOT: saved %lu blocks (%lu bytes) to %s\n",
            (unsigned long)s_num_blocks, (unsigned long)s_blob_offset, s_aot_path);
+
+    free(s_blob_buf);
+    s_blob_buf    = NULL;
+    s_num_blocks  = 0;
+    s_blob_offset = 0;
 }
 
 int aot_load(void)
@@ -341,7 +368,15 @@ int aot_load(void)
         while (emit_getCurrAdr() & 0x3) emit_Skip(4);
 
         make_address_range_executable((u32)dst, (u32)dst + e->blob_size);
-        JIT_COMPILED_FUNC(e->arm_addr, e->procnum) = (uintptr_t)dst;
+        uintptr_t fn = (uintptr_t)dst;
+        JIT_COMPILED_FUNC(e->arm_addr, e->procnum) = fn;
+        JIT_MarkCodePage(e->arm_addr);
+        if (s_num_loaded < AOT_LOADED_MAX) {
+            s_loaded_ptrs [s_num_loaded] = fn;
+            s_loaded_arms [s_num_loaded] = e->arm_addr;
+            s_loaded_procs[s_num_loaded] = e->procnum;
+            s_num_loaded++;
+        }
         loaded++;
     }
 
@@ -415,6 +450,11 @@ void aot_precompile(void)
 
             if (JIT_COMPILED_FUNC(addr, 0) != 0) {
                 compiled++;
+                void *blk_start = (void*)JIT_COMPILED_FUNC(addr, 0);
+                void *blk_end   = emit_GetPtr();
+                if (blk_end > blk_start)
+                    aot_capture_block(blk_start, blk_end, addr, 0, interpreted_cycles);
+
                 u32 next = NDS_ARM9.next_instruction;
                 if (next > addr + 4 && next < base + size)
                     off = next - base - 4;

@@ -527,7 +527,9 @@ void EMU_Conf()
 	// ReAddress display to 32bit vram
 	pspDebugScreenInitEx((void *)(0x44000000), PSP_DISPLAY_PIXEL_FORMAT_5551, 1);
 
-	DoConfig(&my_config);
+	// Settings are now chosen in the split-screen ROM menu (DSEmuGui) and already
+	// finalized into my_config there; no separate DoConfig pass is needed.
+	FinalizeMainSettings(&my_config);
 
 	NDS_3D_ChangeCore(my_config.Render3D);
 	backup_setManualBackupType(my_config.savetype);
@@ -567,17 +569,12 @@ void ChangeRom(bool reset)
 	DSEmuGui("", rom_filename);
 	EMU_Conf();
 
-	aot_init(rom_filename);
-
 	if (NDS_LoadROM(rom_filename) < 0)
 	{
 		WriteLog("ERROR ROM:");
 		WriteLog(rom_filename);
 		exit(-1);
 	}
-
-	if (my_config.aot_precompile)
-		aot_precompile();
 
 	//userEnableProfiler();
 	execute = true;
@@ -603,7 +600,6 @@ void deinit(){
 	#ifdef PROFILE
 	gprof_stop("desmume.out", 1);
 	#endif
-	aot_close();
 	NDS_DeInit();
 	sceKernelExitGame();
 }
@@ -644,9 +640,7 @@ int main(int argc, char **argv)
 
 	#ifdef PROFILE
 	execute = true;
-	aot_init("test.nds");
 	NDS_LoadROM("test.nds");
-	if (my_config.aot_precompile) aot_precompile();
 	my_config.Render3D = true;
 	my_config.showfps = true;
 #else

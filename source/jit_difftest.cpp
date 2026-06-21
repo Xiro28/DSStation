@@ -51,6 +51,11 @@ void arm_jit_reset(bool enable, bool suppress_msg);
 extern const OpFunc arm_instructions_set[2][4096];
 extern const OpFunc thumb_instructions_set[2][1024];
 
+// Global scheduler state (defined in NDSSystem.cpp). Declared OUTSIDE the
+// anonymous namespace so they resolve to the real globals (not anon-mangled).
+extern s32 arm9;
+extern s32 s32next;
+
 // Same address blockdecoder.cpp uses; setting it to 1 makes the chain exit
 // after the first compiled block instead of chasing the trailing "B ." forever.
 #define NDS_ReschedulePtr (*(bool *)(0x0010080))
@@ -105,10 +110,18 @@ void take_snapshot(const armcpu_t &cpu, CpuSnapshot &s)
 void run_interpreter(armcpu_t &cpu, u32 op, bool thumb)
 {
    cpu.instruction = op;
-   if (thumb)
+   if (thumb) {
       thumb_instructions_set[0][op >> 6](op);
-   else
-      arm_instructions_set[0][INSTRUCTION_INDEX(op)](op);
+      return;
+   }
+   // The ARM instruction functions assume the condition already passed (in the
+   // real core, armcpu_exec checks it). For a faithful diff we must honor the
+   // condition here too: a false condition makes the instruction a NOP, so the
+   // JIT (which DOES honor conditions) can be validated against it.
+   const u32 cond = CONDITION(op);
+   if (cond != 0xE && !TEST_COND(cond, CODE(op), cpu.CPSR))
+      return;   // condition false -> NOP
+   arm_instructions_set[0][INSTRUCTION_INDEX(op)](op);
 }
 
 // Compile a single-instruction block at base and run it via the chain.
@@ -167,7 +180,7 @@ int begin_family(const char *name)
 
 // Distinct failing opcodes (so the same buggy form across seeds prints once).
 struct FailRec { u32 op; const char *fam; };
-constexpr int MAX_FAILS = 24;
+constexpr int MAX_FAILS = 64;
 FailRec g_fail_list[MAX_FAILS];
 int     g_nfail_list = 0;
 
@@ -218,7 +231,7 @@ bool check_op(u32 op, bool thumb, const char *name)
             g_fail_list[g_nfail_list++] = { op, name };
          // Detailed dump for the first few distinct failures: show the inputs
          // each operand register actually held, then expected (interp) vs jit.
-         if (g_nfail_list <= 6) {
+         if (g_nfail_list <= 30) {
             DTPRINT("[FAIL] %s op=%08X native=%d seed=%d\n", name, op, native, seed);
             // inputs: only the registers this opcode reads, plus flags-in.
             const u32 rn = (op >> 16) & 0xF, rm = op & 0xF,
@@ -315,6 +328,154 @@ void sweep_dataproc()
    }
 }
 
+// Sweep CONDITIONAL data-processing S-ops. The main sweep only uses cond=AL, so
+// it can't see bugs in the conditional commit path (result OR flags must stay
+// unchanged when the condition is false). Here we use EQ (0x0) and NE (0x1):
+// seed_state randomizes NZCV per seed, so across SEEDS_PER_OP roughly half the
+// runs have the condition false — both interp and jit must then leave Rd and the
+// flags exactly as they were on entry.
+void sweep_dataproc_cond()
+{
+   static const char *opc_names[16] = {
+      "AND","EOR","SUB","RSB","ADD","ADC","SBC","RSC",
+      "TST","TEQ","CMP","CMN","ORR","MOV","BIC","MVN" };
+   // Only the opcodes we JIT with flags are interesting here.
+   static const u32 opcs[] = { 0,2,4,12 };   // AND, SUB, ADD, ORR (+ EOR via 1)
+   static const u32 conds[] = { 0x0 /*EQ*/, 0x1 /*NE*/ };
+   const u32 rn = 3, rd = 2, rm = 4;
+   for (u32 opc : { 0u,1u,2u,4u,12u })       // AND EOR SUB ADD ORR
+   for (u32 cond : conds)
+   {
+      char fam[24];
+      // immediate form
+      snprintf(fam, sizeof(fam), "%sS %s imm", opc_names[opc], cond ? "NE" : "EQ");
+      begin_family(fam);
+      for (u32 imm8 : {1u, 0x80u, 0xFFu})
+         check_op(dp(cond, opc, 1, rn, rd, imm8, true), false, fam);
+      // a register-shift form (LSL #3) to exercise the shifted path too
+      snprintf(fam, sizeof(fam), "%sS %s lsl3", opc_names[opc], cond ? "NE" : "EQ");
+      begin_family(fam);
+      check_op(dp(cond, opc, 1, rn, rd, (3u<<7)|(0u<<5)|rm, false), false, fam);
+   }
+   (void)opcs; (void)rn;
+}
+
+// Branch tester. Unlike check_op (which skips R15 and appends a trailing "B ."),
+// this compares the FINAL control-flow state after the branch: next_instruction
+// (where execution actually continues), R15, R14 (link), and CPSR/flags. With
+// NDS_ReschedulePtr forced to 1 inside run_jit, the branch helper does NOT recurse
+// into the target block — it only sets the registers — which is exactly what we
+// want to validate against the interpreter.
+bool check_branch(u32 op, const char *name)
+{
+   armcpu_t &cpu = *g_cpu;
+   FamStat &fam = g_fams[g_cur_fam];
+   fam.tested++;
+   bool native_seen = false;
+
+   for (int seed = 0; seed < SEEDS_PER_OP; seed++)
+   {
+      const u32 reg_seed  = 0xC0FFEEu * (seed + 1) + op;
+      const u32 flag_seed = (op << 3) ^ (seed * 0x40000000u);
+
+      g_rng = reg_seed; seed_mem(); seed_state(cpu, g_adr, flag_seed);
+      run_interpreter(cpu, op, false);
+      const u32 i_next = cpu.next_instruction, i_r15 = cpu.R[15],
+                i_r14 = cpu.R[14], i_cpsr = cpu.CPSR.val;
+
+      g_rng = reg_seed; seed_mem(); seed_state(cpu, g_adr, flag_seed);
+      const bool native = run_jit(cpu, op, false, g_adr);
+      native_seen = native_seen || native;
+      const u32 j_next = cpu.next_instruction, j_r15 = cpu.R[15],
+                j_r14 = cpu.R[14], j_cpsr = cpu.CPSR.val;
+
+      if (i_next != j_next || i_r14 != j_r14 || i_cpsr != j_cpsr)
+      {
+         fam.failed++;
+         DTPRINT("[FAIL] %s op=%08X native=%d seed=%d\n", name, op, native, seed);
+         DTPRINT("   next exp=%08X jit=%08X  R15 exp=%08X jit=%08X\n", i_next, j_next, i_r15, j_r15);
+         DTPRINT("   R14  exp=%08X jit=%08X  cpsr exp=%08X jit=%08X\n", i_r14, j_r14, i_cpsr, j_cpsr);
+         if (native_seen) fam.native++;
+         return false;
+      }
+   }
+   if (native_seen) fam.native++;
+   return true;
+}
+
+// Chaining test: does a JIT branch actually transfer control to the target block
+// AND execute it? Single-instruction check_branch only validates register setup;
+// this runs a real multi-block chain (NDS_ReschedulePtr=0) bounded by a cycle
+// budget. branch at g_adr -> target g_adr+0x40 which is [MOV r5,#0x42 ; B .].
+// If r5 becomes 0x42, the branch chained to and ran the target.
+void check_branch_chain(u32 branch_op, const char *name)
+{
+   armcpu_t &cpu = *g_cpu;
+   const u32 target = g_adr + 0x40;
+
+   seed_mem();
+   _MMU_ARM9_write32(g_adr,      branch_op);
+   _MMU_ARM9_write32(g_adr + 4,  0xEAFFFFFEu);   // guard (not reached if branch taken)
+   _MMU_ARM9_write32(target,     0xE3A05042u);   // MOV r5, #0x42
+   _MMU_ARM9_write32(target + 4, 0xEAFFFFFEu);   // B . (self loop -> exits on cycle budget)
+
+   seed_state(cpu, g_adr, 0);
+   cpu.R[5] = 0;
+
+   JIT_COMPILED_FUNC(g_adr, 0)      = 0;
+   JIT_COMPILED_FUNC(target, 0)     = 0;
+   JIT_COMPILED_FUNC(target + 4, 0) = 0;
+
+   // Diagnostic: can we even compile a block AT the target address?
+   cpu.CPSR.bits.T = 0;
+   cpu.instruct_adr = target; cpu.next_instruction = target + 4; cpu.R[15] = target + 8;
+   arm_jit_compile<0>();
+   DTPRINT("[CHAIN] %s: target precompile -> %08X\n", name, (u32)JIT_COMPILED_FUNC(target, 0));
+
+   // Reset to the branch and run the chain.
+   cpu.instruct_adr = g_adr; cpu.next_instruction = g_adr + 4; cpu.R[15] = g_adr + 8;
+   cpu.R[5] = 0;
+   JIT_COMPILED_FUNC(g_adr, 0) = 0;
+
+   arm9 = 0; s32next = 100000;
+   const bool saved = NDS_ReschedulePtr;
+   NDS_ReschedulePtr = 0;                         // ALLOW chaining (the real in-game path)
+
+   // Mimic exec_cpu's outer loop: look up the block at instruct_adr, compile if
+   // needed, run it; the chain may exit (idle/event) — then re-enter. A correct
+   // branch must eventually transfer control so the target's MOV runs (r5=0x42).
+   for (int k = 0; k < 8 && cpu.R[5] != 0x42; k++)
+   {
+      uintptr_t b = JIT_COMPILED_FUNC(cpu.instruct_adr, 0);
+      if (!b) { arm_jit_compile<0>(); b = JIT_COMPILED_FUNC(cpu.instruct_adr, 0); }
+      if (!b) { DTPRINT("[CHAIN] %s: instr_adr=%08X not compiled\n", name, cpu.instruct_adr); break; }
+      run_block_chain(&cpu, b);
+   }
+   NDS_ReschedulePtr = saved;
+
+   const bool ok = (cpu.R[5] == 0x42);
+   DTPRINT("[CHAIN] %s: r5=%08X(want 42) next=%08X %s\n",
+           name, cpu.R[5], cpu.next_instruction, ok ? "OK" : "FAIL");
+}
+
+void sweep_branch()
+{
+   // pc at g_adr; R15 = g_adr+8 at execute. B target = R15 + (signext(off24)<<2).
+   begin_family("B fwd");   check_branch(0xEA00000Eu, "B fwd");    // +0x40
+   begin_family("B back");  check_branch(0xEAFFFFF8u, "B back");   // -0x18
+   begin_family("BL fwd");  check_branch(0xEB00000Eu, "BL fwd");
+   begin_family("BL back"); check_branch(0xEBFFFFF8u, "BL back");
+   // Conditional branches (EQ/NE): seeds vary flags so both taken & not-taken hit.
+   begin_family("Beq");     check_branch(0x0A00000Eu, "Beq");
+   begin_family("Bne");     check_branch(0x1A00000Eu, "Bne");
+   begin_family("BLeq");    check_branch(0x0B00000Eu, "BLeq");
+   begin_family("BLne");    check_branch(0x1B00000Eu, "BLne");
+
+   // Real chaining (NDS_ReschedulePtr=0): branch must reach+run the target block.
+   check_branch_chain(0xEA00000Eu, "B->target");
+   check_branch_chain(0xEB00000Eu, "BL->target");
+}
+
 // Sweep LDR/STR (word & byte) immediate and register offset, pre/post, up/down,
 // with and without writeback.
 void sweep_ldrstr()
@@ -385,10 +546,13 @@ extern "C" void jit_difftest_run_force()
    g_adr = SCRATCH_BASE + 0x200;
    g_nfams = 0; g_nfail_list = 0; g_cur_fam = -1;
 
-   sweep_dataproc();
+   // TEMP: focus on LDR/STR to debug partial-block LDRi divergence.
    sweep_ldrstr();
-   sweep_ldmstm();
-   sweep_mul();
+   // sweep_branch();
+   // sweep_dataproc();
+   // sweep_dataproc_cond();
+   // sweep_ldmstm();
+   // sweep_mul();
 
    cpu = saved;
 

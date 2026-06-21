@@ -520,8 +520,109 @@ void ShowFPS(int x, int y)
 }
 
 extern void cpuSendInterrupt();
+extern int meFrameLag();
+// Max frames the ME may be behind before the CPU stops queuing new work.
+// 1 = one frame in flight is normal (double buffer); >1 means the ME is behind.
+static const int ME_MAX_LAG = 1;
+
+// ─── Manual zone profiler (user-mode, no kernel libs) ────────────────────────
+// Answers "where does the frame go?" and specifically "is the Media Engine
+// keeping up with the 2D?". All times in microseconds from sceKernelGetSystemTimeLow.
+//   arm  = inter-frame ARM/JIT/3D/IRQ execution (the suspected main-CPU bottleneck)
+//   blit = GU display work done on the main CPU in desmume_cycle (ME trigger + EMU_SCREEN)
+//   me_keepup = %% of frames where the ME had already finished the previous 2D frame
+// Prints once per second via printf. Toggle with PROFILER_ENABLED in MMU.h.
+#if PROFILER_ENABLED
+// Accumulated 3D-geometry time (gfx3d_doFlush), filled from gfx3d.cpp. Part of
+// the "arm" lump; reported separately so we can see how much of a heavy frame is
+// 3D geometry on the main CPU vs the rest (pure ARM9/ARM7 emulation).
+u32 g_prof_gfx3d_us = 0;
+u32 g_prof_arm9_us = 0;   // exec_cpu (ARM9 emulation + 3D command exec)
+u32 g_prof_arm7_us = 0;   // executeARM7Stuff (ARM7 HLE: keypad housekeeping)
+u32 g_prof_hw_us   = 0;   // exec_hw (sequencer.execHardware: timers, DMA, SPU, events)
+u32 g_prof_a9_cyc   = 0;  // ARM9 cycles executed this frame
+u32 g_prof_a9_calls = 0;  // armcpu_exec<ARM9> invocations (chain entries) this frame
+u32 g_prof_a9_idle  = 0;  // ARM9 idle cycles this frame (snapshot of nds.idleCycles[0])
+u32 g_prof_recompiles = 0; // arm_jit_compile calls/frame (high => block invalidation thrash)
+u32 g_prof_itp_exec = 0;   // ARM9 instructions run via interpreter fallback (OP_ITP) this frame
+u32 g_itp_hist[40] = {0};  // per-opcode-class interpreter-fallback histogram (see OP_ITP)
+static const char *g_itp_names[40] = {
+	"AND","ANDS","EOR","EORS","SUB","SUBS","RSB","RSBS","ADD","ADDS","ADC","ADCS",
+	"SBC","SBCS","RSC","RSCS","TST/MRS","TST","TEQ/MSR","TEQ","CMP/MRS","CMP","CMN/MSR","CMN",
+	"ORR","ORRS","MOV","MOVS","BIC","BICS","MVN","MVNS",
+	"LDRi","LDRr","STRi","STRr","LDM","STM","B/BL","COP/SWI"
+};
+// Timing accessor for other translation units (e.g. gfx3d.cpp, arm7_hle.cpp) so
+// they don't need to pull in / redeclare the PSP SDK timer prototype.
+extern "C" unsigned int prof_us(void) { return sceKernelGetSystemTimeLow(); }
+static void prof_report(u32 arm_us, u32 blit_us, int me_drawn)
+{
+	static u32 acc_arm = 0, acc_blit = 0, acc_gfx = 0, acc_a9 = 0, acc_a7 = 0, acc_hw = 0, frames = 0, me_ready = 0, last = 0;
+	static u32 acc_cyc = 0, acc_idle = 0, acc_calls = 0, acc_recomp = 0, acc_itp = 0;
+	acc_arm += arm_us; acc_blit += blit_us; acc_gfx += g_prof_gfx3d_us;
+	acc_a9 += g_prof_arm9_us; acc_a7 += g_prof_arm7_us; acc_hw += g_prof_hw_us;
+	acc_cyc += g_prof_a9_cyc; acc_idle += g_prof_a9_idle; acc_calls += g_prof_a9_calls;
+	acc_recomp += g_prof_recompiles; acc_itp += g_prof_itp_exec;
+	g_prof_gfx3d_us = g_prof_arm9_us = g_prof_arm7_us = g_prof_hw_us = 0;
+	g_prof_a9_cyc = g_prof_a9_idle = g_prof_a9_calls = g_prof_recompiles = g_prof_itp_exec = 0;
+	frames++; if (me_drawn) me_ready++;
+	u32 now = sceKernelGetSystemTimeLow();
+	if (last == 0) last = now;
+	if (now - last >= 1000000 && frames)
+	{
+		u32 a = acc_arm / frames, g = acc_gfx / frames, b = acc_blit / frames;
+		u32 a9 = acc_a9 / frames, a7 = acc_a7 / frames, hw = acc_hw / frames;
+		u32 known = a9 + a7 + g + hw;
+		u32 other = a > known ? a - known : 0;   // unattributed inter-frame cost
+		printf("[PROF] fps=%u arm=%u.%02u (arm9=%u.%02u hw=%u.%02u gfx3d=%u.%02u arm7=%u.%02u other=%u.%02u) blit=%u.%02u me=%u%%\n",
+			frames,
+			a / 1000, (a % 1000) / 10,
+			a9 / 1000, (a9 % 1000) / 10,
+			hw / 1000, (hw % 1000) / 10,
+			g / 1000, (g % 1000) / 10,
+			a7 / 1000, (a7 % 1000) / 10,
+			other / 1000, (other % 1000) / 10,
+			b / 1000, (b % 1000) / 10,
+			me_ready * 100 / frames);
+		// ARM9 work breakdown: cycles, idle cycles, and chain entries per frame.
+		// busy-wait not detected => cyc normal-ish but idle LOW and/or calls huge.
+		printf("[PROF9] a9cyc/f=%u idle/f=%u(%u%%) calls/f=%u recompiles/f=%u itp/f=%u ns_per_cyc=%u\n",
+			acc_cyc / frames, acc_idle / frames,
+			acc_cyc ? (acc_idle * 100 / acc_cyc) : 0,
+			acc_calls / frames,
+			acc_recomp / frames,
+			acc_itp / frames,
+			acc_cyc ? (u32)((u64)(acc_a9) * 1000 / acc_cyc) : 0);
+		// Interpreter-fallback histogram: top opcode classes per frame (delta).
+		{
+			static u32 last_hist[40] = {0};
+			char line[320]; int n = 0;
+			n += snprintf(line + n, sizeof(line) - n, "[ITP]");
+			for (int i = 0; i < 40 && n < (int)sizeof(line) - 24; i++) {
+				u32 d = g_itp_hist[i] - last_hist[i];
+				last_hist[i] = g_itp_hist[i];
+				u32 perf = frames ? d / frames : 0;
+				if (perf >= 500)   // only meaningful buckets
+					n += snprintf(line + n, sizeof(line) - n, " %s=%u", g_itp_names[i], perf);
+			}
+			printf("%s\n", line);
+		}
+		acc_arm = acc_blit = acc_gfx = acc_a9 = acc_a7 = acc_hw = frames = me_ready = 0;
+		acc_cyc = acc_idle = acc_calls = acc_recomp = acc_itp = 0;
+		last = now;
+	}
+}
+#endif // PROFILER_ENABLED
+
 static void desmume_cycle()
 {
+#if PROFILER_ENABLED
+	static u32 prof_prev_exit = 0;
+	const u32 prof_enter = sceKernelGetSystemTimeLow();
+	const u32 prof_arm_us = prof_prev_exit ? (prof_enter - prof_prev_exit) : 0;
+	const int prof_me_drawn = drawn ? 1 : 0;
+	u32 prof_blit_us = 0;
+#endif
 	u16 pad = 0;
 
 	const int FRAME_TIME_MICROSEC = max_framerate[my_config.fps_cap_num];
@@ -583,25 +684,26 @@ static void desmume_cycle()
 		}
 	}
 
+#if PROFILER_ENABLED
+	const u32 prof_blit_start = sceKernelGetSystemTimeLow();
+#endif
+
 	// Process non-emulation (hardware) rendering and interrupts.
 	if (likely(!IsEmu()))
 	{
-		if (drawn || (ShouldSkip2dFrame() && !drawingInterruptPending))
+		const bool skip2d = ShouldSkip2dFrame();
+		// Closed-loop: ask the ME how far behind it actually is instead of
+		// guessing from the frameskip state. Only defer when it is truly behind.
+		const bool me_behind = (meFrameLag() > ME_MAX_LAG);
+
+		if (drawn || drawingInterruptPending || skip2d)
 		{
-			// If a new frame was drawn, decide whether to send an interrupt now
-			// or mark one as pending based on whether the 2D frame should be skipped.
-			/*if (!ShouldSkip2dFrame()) {*/
-
-			/*} else {
-				drawingInterruptPending = true;
-			}*/
-
 			const bool frame_drawn = drawingInterruptPending || drawn;
 
-			// Since the ME runs slower than the CPU, we need to draw the screen even if the frameskip is enabled.
-			// This is because the ME could wait up to 10 frames before drawing the screen again. So better to set it pending.
-			// And if not triggered by the ME on the next frame, then we can draw the screen.
-			if (ShouldSkip2dFrame())
+			// Queue a new draw only when the ME has the budget for it. If the 2D
+			// frame is skipped, or the ME is overwhelmed, defer the interrupt; it
+			// gets sent on a later frame once the ME catches up.
+			if (skip2d || me_behind)
 			{
 				drawingInterruptPending = true;
 			}
@@ -614,7 +716,7 @@ static void desmume_cycle()
 
 			// Render the screen (using 3D frame-skipping state)
 			if (frame_drawn){
-				EMU_SCREEN(ShouldSkip2dFrame(), ShouldSkip3dFrame());
+				EMU_SCREEN(skip2d, ShouldSkip3dFrame());
 			}
 		}
 	}
@@ -632,13 +734,20 @@ static void desmume_cycle()
 	if (my_config.showfps)
 		ShowFPS(0, 3);
 
-	EMU_SCREEN_Finish(); 
+	EMU_SCREEN_Finish();
+
+#if PROFILER_ENABLED
+	prof_blit_us = sceKernelGetSystemTimeLow() - prof_blit_start;
+	prof_prev_exit = sceKernelGetSystemTimeLow();
+	prof_report(prof_arm_us, prof_blit_us, prof_me_drawn);
+#endif
 
 	/*if (my_config.enable_sound)
 		SPU_Emulate_user();*/
 }
 
-LRUCache<1024 * 256> cached_rom;
+//LRUCache<1024 * 256> cached_rom;
+std::unordered_map<unsigned, int> cached_rom;
 
 int NDS_Init()
 {
@@ -994,7 +1103,7 @@ u32 GameInfo::readROM(u32 pos, bool store)
 
 	return data;
 #else
-	u32 data = cached_rom.get(pos);
+	u32 data = cached_rom[pos];
 
 	if (data == -1)
 	{
@@ -2212,8 +2321,17 @@ static void execHardware_hstart()
 	else if (nds.hw_status.VCount == 192)
 	{
 		// turn on vblank status bit
+#if PROFILER_ENABLED
+		{
+			extern u32 g_prof_arm7_us;
+			const u32 _t7 = sceKernelGetSystemTimeLow();
+			executeARM7Stuff();
+			g_prof_arm7_us += sceKernelGetSystemTimeLow() - _t7;
+		}
+#else
 		executeARM7Stuff();
-		
+#endif
+
 		T1WriteWord(MMU.ARM9_REG, 4, T1ReadWord(MMU.ARM9_REG, 4) | 1);
 		T1WriteWord(MMU.ARM7_REG, 4, T1ReadWord(MMU.ARM7_REG, 4) | 1);
 
@@ -2524,20 +2642,34 @@ void exec_cpu()
 
 void exec_cpu()
 {
+#if PROFILER_ENABLED
+	const u32 _prof_t9 = sceKernelGetSystemTimeLow();
+#endif
 	NDS_ReschedulePtr = 0;
 
 	s32next = sequencer.popNext(nextEvent);
 
 	u64 nds_timer_base = nds_timer;
 	arm9 = (s32)(nds_arm9_timer - nds_timer);
-	
+
+#if PROFILER_ENABLED
+	const s32 _prof_arm9_start = arm9;
+	const u32 _prof_idle_start = nds.idleCycles[0];
+#endif
+
 	while (arm9 < s32next && NDS_ReschedulePtr == 0)
 	{
+#if PROFILER_ENABLED
+		g_prof_a9_calls++;
+#endif
 		arm9 += armcpu_exec<ARMCPU_ARM9, true>();  // JIT=true per your new path
 		nds_timer = nds_timer_base + arm9;
 
-		if ((NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ) || nds.freezeBus)
+		if ((NDS_ARM9.freeze & CPU_FREEZE_WAIT_IRQ) || nds.freezeBus || NDS_ARM9.idle_loop)
 		{
+			// idle_loop: the JIT detected a spin that only the next scheduled
+			// event can break. Without this the chain exits but the while-loop
+			// just re-runs the spin block-by-block up to s32next (no skip).
 			nds.idleCycles[0] += (s32next - arm9);
 			arm9 = s32next; // Jump directly to the next event // std::min(s32next, arm9 + kIrqWait);
 
@@ -2563,8 +2695,14 @@ void exec_cpu()
 	nds_arm9_timer = nds_timer_base + arm9;
 	nds_arm7_timer = nds_timer_base + (arm9 >> 1);
 
-	
+
 	sequencer.updateEventCycle(nextEvent, arm9);
+
+#if PROFILER_ENABLED
+	g_prof_a9_cyc  += (u32)(arm9 - _prof_arm9_start);
+	g_prof_a9_idle += (nds.idleCycles[0] - _prof_idle_start);
+	g_prof_arm9_us += sceKernelGetSystemTimeLow() - _prof_t9;
+#endif
 }
 
 // This will be our instruction pointer for the NDS execution loop in asm in order to have a better instruction management.
@@ -2574,7 +2712,14 @@ void exec_hw()
 {
 	// it should be begin to execute execHardware in the next frame,
 	// since there won't be anything for it to do (everything should be scheduled in the future)
+#if PROFILER_ENABLED
+	const u32 _prof_thw = sceKernelGetSystemTimeLow();
 	sequencer.execHardware();
+	extern u32 g_prof_hw_us;
+	g_prof_hw_us += sceKernelGetSystemTimeLow() - _prof_thw;
+#else
+	sequencer.execHardware();
+#endif
 }
 
 

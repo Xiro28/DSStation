@@ -139,7 +139,7 @@ std::function<void(psp_gpr_t src, psp_gpr_t dst, opcode &op)> arm_preop[] = {
             emit_srl(dst, src, 1);
             emit_lbu(psp_t1, RCPU, _flags + 3);       // CPSR top byte (NZCV at 7..4)
             emit_ext(psp_t1, psp_t1, _flag_C8, _flag_C8);  // isolate C (bit 5)
-            emit_ins(dst, psp_t1, 31, 31);
+            emit_ins(dst, psp_t1, 31, 1);              // insert 1 bit at position 31
             return;
         }
 
@@ -491,6 +491,7 @@ void block::optimize_basicblock()
 {
     // === Pass 1: Condition merging ===
     // Consecutive ops with the same condition can skip re-evaluating the flags.
+    if (jit_opt_condmerge)
     {
         opcode *prev = nullptr;
         for (opcode &op : opcodes) {
@@ -503,10 +504,9 @@ void block::optimize_basicblock()
     // === Pass 2: Constant propagation ===
     // Forward pass: track registers whose values are compile-time constants and
     // fold arithmetic/shift expressions into immediate MOVs where possible.
-    // Toggle: set to 0 to disable. Steps A/B are now guarded to ALU ops only —
+    // Runtime toggle (jit_opt_constprop). Steps A/B are guarded to ALU ops only —
     // previously they rewrote memory ops, dropping GX-FIFO stores (3D vanished).
-    #define JIT_ENABLE_CONSTPROP 1
-    if (JIT_ENABLE_CONSTPROP)
+    if (jit_opt_constprop)
     {
         struct ConstVal { bool known; uint32_t val; };
         ConstVal consts[16] = {};
@@ -640,6 +640,9 @@ void block::optimize_basicblock()
 
 void block::optimize_basicblockThumb()
 {
+    if (!jit_opt_thumbflags)
+        return;
+
     opcode *prev_op = 0;
     opcode *prev_ITP = 0;
 
@@ -784,6 +787,7 @@ void block::optimize_basicblockThumb()
 }
 
 extern "C" void set_sub_flags();
+extern "C" void set_add_flags();
 extern "C" void set_and_flags();
 extern "C" void set_op_logic_flags();
 
@@ -833,115 +837,58 @@ void EmitReadFunction(u32 addr)
 }
 
 #define NDS_ReschedulePtr (*(bool *)(0x0010080))
+// Non-recursive: set the target PC into BOTH next_instruction and instruct_adr
+// (continue_cpu_check chains on instruct_adr), then return. Do NOT call code_block()
+// — recursion grows the native stack one frame per taken branch (loops/calls
+// overflow it and corrupt memory). The block epilogue + continue_cpu_check
+// tail-jump to the target with no stack growth.
 template <bool execute>
 u32 jump_to_linked_bc(u32 off)
 {
-    // check if the addr is already compiled
-    u32 addr = NDS_ARM9.R[15] + off;
-
     NDS_ARM9.R[15] += off;
     NDS_ARM9.R[15] &= (0xFFFFFFFC | (NDS_ARM9.CPSR.bits.T << 1));
     NDS_ARM9.next_instruction = NDS_ARM9.R[15];
-
-    ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(NDS_ARM9.next_instruction, ARM9);
-
-    if (code_block && NDS_ReschedulePtr == 0)
-    {
-        // printf("Fast jump\n");
-        const u32 cycles = code_block();
-        return cycles;
-    }
-
-    // compile the block
-    // printf("Compile block\n");
-    // const u32 cycles = arm_jit_compile<ARM9>();
+    NDS_ARM9.instruct_adr     = NDS_ARM9.R[15];
     return 3;
 }
 
 template <bool execute>
 u32 jump_to_linked_blc(u32 off)
 {
-    // check if the addr is already compiled
-    u32 addr = NDS_ARM9.R[15] + off;
-
-    NDS_ARM9.R[14] = NDS_ARM9.next_instruction;
+    NDS_ARM9.R[14] = NDS_ARM9.next_instruction;   // link register = return address
     NDS_ARM9.R[15] += off;
     NDS_ARM9.R[15] &= (0xFFFFFFFC | (NDS_ARM9.CPSR.bits.T << 1));
     NDS_ARM9.next_instruction = NDS_ARM9.R[15];
-
-    ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(NDS_ARM9.next_instruction, ARM9);
-
-    if (code_block && NDS_ReschedulePtr == 0)
-    {
-        // printf("Fast jump\n");
-        const u32 cycles = code_block();
-        return cycles;
-    }
-
-    // compile the block
-    // printf("Compile block\n");
-    // const u32 cycles = arm_jit_compile<ARM9>();
+    NDS_ARM9.instruct_adr     = NDS_ARM9.R[15];
     return 3;
 }
 
 template <bool execute>
 u32 jump_to_linked(u32 addr)
 {
-    // check if the addr is already compiled
-
     NDS_ARM9.CPSR.bits.T = BIT0(addr);
     NDS_ARM9.R[15] = addr & (0xFFFFFFFC | (NDS_ARM9.CPSR.bits.T << 1));
     NDS_ARM9.next_instruction = NDS_ARM9.R[15];
-
-    ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(NDS_ARM9.next_instruction, ARM9);
-
-    if (NDS_ARM9.CPSR.bits.T == BIT0(addr) && code_block && NDS_ReschedulePtr == 0)
-    {
-        // printf("Fast jump\n");
-        const u32 cycles = code_block();
-        return cycles;
-    }
-
-    // compile the block
-    // printf("Compile block\n");
-    // const u32 cycles = arm_jit_compile<ARM9>();
+    NDS_ARM9.instruct_adr     = NDS_ARM9.R[15];
     return 3;
 }
 
 template <bool execute>
 u32 jump_to_linked_br(u32 addr)
 {
-    // check if the addr is already compiled
-    ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(addr, ARM9);
-
-    /*if (NDS_ARM9.CPSR.bits.T == BIT0(addr) && code_block){
-        //printf("Fast jump\n");
-        const u32 cycles = code_block();
-        return cycles;
-    }*/
-
     NDS_ARM9.R[14] = NDS_ARM9.next_instruction;
     NDS_ARM9.CPSR.bits.T = BIT0(addr);
     NDS_ARM9.R[15] = addr & (0xFFFFFFFC | (NDS_ARM9.CPSR.bits.T << 1));
     NDS_ARM9.next_instruction = NDS_ARM9.R[15];
+    NDS_ARM9.instruct_adr     = NDS_ARM9.R[15];
     return 3;
 }
 
 u32 jump_to_linked_uncod_thumb(u32 addr)
 {
-    // check if the addr is already compiled
-
     NDS_ARM9.R[15] += addr;
     NDS_ARM9.next_instruction = NDS_ARM9.R[15];
-
-    ArmOpCompiled code_block = (ArmOpCompiled)JIT_COMPILED_FUNC(NDS_ARM9.next_instruction, ARM9);
-
-    if (code_block && NDS_ReschedulePtr == 0)
-    {
-        // printf("Fast jump thumb\n");
-        const u32 cycles = code_block();
-        return cycles;
-    }
+    NDS_ARM9.instruct_adr     = NDS_ARM9.R[15];
     return 1;
 }
 
@@ -1138,6 +1085,40 @@ void emitARMOP(opcode &op, const bool last_op)
 
             emit_li(psp_a0, op.rs1);
 
+            // PROFILER: count interpreter-fallback executions at runtime, plus a
+            // per-opcode-class histogram so we know exactly which instructions
+            // dominate the fallback. The instruction word (op.rs1) is known at
+            // compile time, so the histogram bucket is a constant address.
+            // t0/t1 are scratch and clobbered by the upcoming interpreter call.
+#if PROFILER_ENABLED
+            {
+                extern u32 g_prof_itp_exec;
+                extern u32 g_itp_hist[];
+                // bucket: ARM class. cls=00 -> dataproc: opcode(4b)*2+S (0..31).
+                //   cls=01 LDR/STR: 32 LDRi,33 LDRr,34 STRi,35 STRr.
+                //   cls=10: 36 LDM,37 STM,38 B/BL. cls=11: 39 coproc/SWI.
+                const u32 instr = op.rs1;
+                const u32 cls = (instr >> 26) & 3;
+                u32 bucket;
+                if (cls == 0)
+                    bucket = (((instr >> 21) & 0xF) << 1) | ((instr >> 20) & 1);
+                else if (cls == 1)
+                    bucket = 32 + (((instr >> 20) & 1) ? 0 : 2) + (((instr >> 25) & 1) ? 1 : 0);
+                else if (cls == 2)
+                    bucket = ((instr >> 25) & 1) ? 38 : (36 + (((instr >> 20) & 1) ? 0 : 1));
+                else
+                    bucket = 39;
+                emit_li(psp_t0, (u32)&g_prof_itp_exec);
+                emit_lw(psp_t1, psp_t0, 0);
+                emit_addiu(psp_t1, psp_t1, 1);
+                emit_sw(psp_t1, psp_t0, 0);
+                emit_li(psp_t0, (u32)&g_itp_hist[bucket]);
+                emit_lw(psp_t1, psp_t0, 0);
+                emit_addiu(psp_t1, psp_t1, 1);
+                emit_sw(psp_t1, psp_t0, 0);
+            }
+#endif // PROFILER_ENABLED
+
             uint32_t optmizeDelaySlot = emit_SlideDelay();
 
             emit_jal(arm_instructions_set[ARM9][INSTRUCTION_INDEX(op.rs1)]);
@@ -1238,6 +1219,81 @@ void emitARMOP(opcode &op, const bool last_op)
         else
             arm_sub<false, true>(op);
         break;
+
+    case OP_ADC:
+    {
+        // rd = rn + op2 + C
+        int32_t regs[3] = {(op.condition != -1) ? op.rd : (op.rd | 0x10), op.rs1, op.rs2};
+        const int nregs = (op.preOpType == PRE_OP_IMM) ? 2 : 3;
+        regman.get(nregs, regs);
+        const psp_gpr_t dst = (op.condition != -1) ? psp_at : (psp_gpr_t)regs[0];
+        conditional_branchless(regs[0], dst, {
+            if (op.preOpType == PRE_OP_IMM) {
+                emit_li(psp_t0, op.imm);
+                emit_addu(dst, (psp_gpr_t)regs[1], psp_t0);
+            } else {
+                arm_preop[getTypeIdx(op.preOpType)]((psp_gpr_t)regs[2], psp_t0, op);
+                emit_addu(dst, (psp_gpr_t)regs[1], psp_t0);
+            }
+            // Read C AFTER arm_preop: the register-shift preops use psp_v0/psp_v1
+            // as scratch and would clobber the carry if it were loaded earlier.
+            emit_lbu(psp_v1, RCPU, _flags + 3);
+            emit_ext(psp_v1, psp_v1, _flag_C8, _flag_C8);
+            emit_addu(dst, dst, psp_v1);
+        });
+        END_OP_CHKR15(regs[0]);
+        break;
+    }
+
+    case OP_SBC:
+    {
+        // rd = rn - op2 + C - 1
+        int32_t regs[3] = {(op.condition != -1) ? op.rd : (op.rd | 0x10), op.rs1, op.rs2};
+        const int nregs = (op.preOpType == PRE_OP_IMM) ? 2 : 3;
+        regman.get(nregs, regs);
+        const psp_gpr_t dst = (op.condition != -1) ? psp_at : (psp_gpr_t)regs[0];
+        conditional_branchless(regs[0], dst, {
+            if (op.preOpType == PRE_OP_IMM) {
+                emit_li(psp_t0, op.imm);
+            } else {
+                arm_preop[getTypeIdx(op.preOpType)]((psp_gpr_t)regs[2], psp_t0, op);
+            }
+            emit_subu(dst, (psp_gpr_t)regs[1], psp_t0);
+            // Read C AFTER arm_preop (reg-shift preops clobber psp_v1).
+            emit_lbu(psp_v1, RCPU, _flags + 3);
+            emit_ext(psp_v1, psp_v1, _flag_C8, _flag_C8);
+            emit_addu(dst, dst, psp_v1);
+            emit_addiu(dst, dst, -1);
+        });
+        END_OP_CHKR15(regs[0]);
+        break;
+    }
+
+    case OP_RSC:
+    {
+        // rd = op2 - rn + C - 1
+        int32_t regs[3] = {(op.condition != -1) ? op.rd : (op.rd | 0x10), op.rs1, op.rs2};
+        const int nregs = (op.preOpType == PRE_OP_IMM) ? 2 : 3;
+        regman.get(nregs, regs);
+        const psp_gpr_t dst = (op.condition != -1) ? psp_at : (psp_gpr_t)regs[0];
+        conditional_branchless(regs[0], dst, {
+            if (op.preOpType == PRE_OP_IMM) {
+                emit_li(psp_t0, op.imm);
+                emit_subu(dst, psp_t0, (psp_gpr_t)regs[1]);
+            } else {
+                arm_preop[getTypeIdx(op.preOpType)]((psp_gpr_t)regs[2], psp_t0, op);
+                emit_subu(dst, psp_t0, (psp_gpr_t)regs[1]);
+            }
+            // Read C AFTER arm_preop (reg-shift preops clobber psp_v1).
+            emit_lbu(psp_v1, RCPU, _flags + 3);
+            emit_ext(psp_v1, psp_v1, _flag_C8, _flag_C8);
+            emit_addu(dst, dst, psp_v1);
+            emit_addiu(dst, dst, -1);
+        });
+        END_OP_CHKR15(regs[0]);
+        break;
+    }
+
     case OP_MUL:
     {
         int32_t regs[3] = {op.condition != -1 ? op.rd : (op.rd | 0x10), op.rs1, op.rs2};
@@ -1424,16 +1480,17 @@ void emitARMOP(opcode &op, const bool last_op)
 
         check_flags()
 
+            // Mirror OP_BC but via jump_to_linked_blc, which also sets R14 (link
+            // register = return address) and then directly runs the target block
+            // if it's already compiled — keeping the chain alive across BL (very
+            // common: every function call). Previously BL fell through to
+            // continue_cpu_check, breaking the chain on every call.
+            emit_movi(psp_v0, 1);
         conditional(
-            // R[14] = next_instruction (return address)
-            emit_lw(psp_at, RCPU, _next_instr);
-            emit_sw(psp_at, RCPU, _reg(14));
-            // next_instruction = R[15] + off (branch target); ARM targets are always word-aligned
-            emit_lw(psp_at, RCPU, _R15);
             emit_li(psp_a0, op.imm);
-            emit_addu(psp_a0, psp_a0, psp_at);
-            emit_sw(psp_a0, RCPU, _R15);
-            emit_sw(psp_a0, RCPU, _next_instr);)
+            u32 op = emit_SlideDelay();
+            emit_jal(jump_to_linked_blc<true>);
+            emit_Write32(op);)
     }
     break;
 
@@ -1502,7 +1559,8 @@ void emitARMOP(opcode &op, const bool last_op)
                 const int special_type = op.preOpType >> 16;
                 const bool is_special_type = (special_type == PRE_OP_LSL_IMM || special_type == PRE_OP_LSR_IMM ||
                                               special_type == PRE_OP_ASR_IMM || special_type == PRE_OP_ROR_IMM);
-                const int type = op.preOpType & 0xff;
+                // 0x1ff not 0xff: PRE_OP_IMM_POST_M==257 needs bit 8 (see OP_LDR).
+                const int type = op.preOpType & 0x1ff;
 
                 const bool positive = op.imm >= 0;
 
@@ -1611,7 +1669,10 @@ void emitARMOP(opcode &op, const bool last_op)
         const int special_type = op.preOpType >> 16;
         const bool is_special_type = (special_type == PRE_OP_LSL_IMM || special_type == PRE_OP_LSR_IMM ||
                                       special_type == PRE_OP_ASR_IMM || special_type == PRE_OP_ROR_IMM);
-        const int type = op.preOpType & 0xff;
+        // NB: addressing mode lives in the low 16 bits (shift type is at >>16).
+        // Must mask 0x1ff, not 0xff: PRE_OP_IMM_POST_M == (256|1) == 257, so 0xff
+        // would drop bit 8 and mis-handle post-index as a plain offset load.
+        const int type = op.preOpType & 0x1ff;
 
         const bool positive = op.imm >= 0;
 
@@ -1695,7 +1756,51 @@ void emitARMOP(opcode &op, const bool last_op)
                 }
 
                 if (OP_LDR == op._op) {
-                    if (op.extra_flags & EXTFL_DIRECTMEMACCESS)
+                    if (jit_opt_fastmem && PROCNUM == ARMCPU_ARM9)
+                    {
+                        // Runtime fast/slow path for word LDR (ARM9). Inline the
+                        // common main-RAM load; route DTCM and everything else to
+                        // the slow _MMU_read32 (which handles DTCM correctly).
+                        // a0 = effective address. regs[0] = dest. Scratch: t1,t2,v0.
+                        // Instruction layout is fixed-size so branch offsets are exact.
+                        const u32 dtcmRegAddr = (u32)&MMU.DTCMRegion;
+                        const u32 mainMemBase = (u32)MMU.MAIN_MEM;
+                        const u32 dtcmHi = ((dtcmRegAddr + 0x8000) >> 16) & 0xFFFF;
+                        const u32 dtcmLo = (u32)(s16)dtcmRegAddr;
+                        const u32 mmHi   = ((mainMemBase + 0x8000) >> 16) & 0xFFFF;
+                        const u32 mmLo   = (u32)(s16)mainMemBase;
+                        const u32 fmBase = (u32)emit_GetPtr();
+                        const u32 SLOW = fmBase + 21 * 4;
+                        const u32 HAVE = fmBase + 23 * 4;
+
+                        emit_sll(regs[0], psp_a0, 3);                 // 0: rotate amount
+                        emit_srl(psp_t2, psp_a0, 14);                 // 1
+                        emit_sll(psp_t2, psp_t2, 14);                 // 2: t2 = addr & ~0x3FFF
+                        emit_lui(psp_t1, dtcmHi);                     // 3
+                        emit_lw(psp_t1, psp_t1, dtcmLo);             // 4: t1 = DTCMRegion
+                        emit_beq(psp_t2, psp_t1, SLOW);               // 5: DTCM -> slow
+                        emit_nop();                                   // 6
+                        emit_srl(psp_t2, psp_a0, 24);                 // 7
+                        emit_andi(psp_t2, psp_t2, 0x0F);              // 8
+                        emit_movi(psp_t1, 0x02);                      // 9
+                        emit_bne(psp_t2, psp_t1, SLOW);               // 10: not main RAM -> slow
+                        emit_nop();                                   // 11
+                        emit_sll(psp_t2, psp_a0, 10);                 // 12
+                        emit_srl(psp_t2, psp_t2, 10);                 // 13: t2 = addr & 0x3FFFFF
+                        emit_ins(psp_t2, psp_zero, 1, 0);             // 14: t2 = addr & 0x3FFFFC
+                        emit_lui(psp_t1, mmHi);                       // 15
+                        emit_addiu(psp_t1, psp_t1, mmLo);             // 16: t1 = MAIN_MEM base
+                        emit_addu(psp_t1, psp_t1, psp_t2);            // 17
+                        emit_lw(psp_v0, psp_t1, 0);                   // 18: v0 = word
+                        emit_beq(psp_zero, psp_zero, HAVE);           // 19: -> have
+                        emit_nop();                                   // 20
+                        // SLOW (21):
+                        emit_jal(_MMU_read32<PROCNUM>);               // 21
+                        emit_ins(psp_a0, psp_zero, 1, 0);             // 22: delay slot: align a0
+                        // HAVE (23):
+                        emit_rotrv(regs[0], psp_v0, regs[0]);         // 23: ARM unaligned rotate
+                    }
+                    else if (op.extra_flags & EXTFL_DIRECTMEMACCESS)
                     {
                         // printf("DIRECT ACCEESS %x, %x, %x\n", MMU.ARM9_DTCM, MMU.MAIN_MEM, (u32)&MMU.DTCMRegion);
                         emit_sll(regs[0], psp_a0, 3);
@@ -1904,39 +2009,22 @@ void emitARMOP(opcode &op, const bool last_op)
 
     case OP_CMN:
     {
+        // CMN sets flags as Rn + op2 (compare with negative). The old codegen
+        // wrongly subtracted (Rn - op2) and mixed add/sub flag formulas. Mirror
+        // OP_CMP but use addition and set_add_flags (a0=left, a1=right, v0=res).
         int32_t regs[2] = {op.rs1, op.rs2};
-        
-        printf("Cmn: 0x%x\n", (u32)emit_getCurrAdr());
 
         conditional(
             if (op.preOpType == PRE_OP_IMM) {
                 regman.get(1, regs);
                 emit_li(psp_a1, op.imm);
-                emit_subu(psp_v0, (psp_gpr_t)regs[0], psp_a1);
             } else {
                 regman.get(2, regs);
                 arm_preop[getTypeIdx(op.preOpType)]((psp_gpr_t)regs[1], psp_a1, op);
-                emit_subu(psp_v0, (psp_gpr_t)regs[0], psp_a1);
             }
-
-            emit_srl(psp_t1, psp_v0, 31);
-            emit_sltiu(psp_t3, psp_v0, 1);
- 
-            // t0 = c
-            emit_not(psp_t0, (psp_gpr_t)regs[0]);
-            emit_sltu(psp_t0, psp_t0, psp_a1);
-
-            // V
-            emit_slt(psp_t2, psp_a1, psp_zero);
-            emit_slt(psp_t4, psp_v0, psp_t0);
-            emit_xor(psp_t2, psp_t2, psp_t4);
-
-
-            emit_ins(psp_gp, psp_t0, _flag_C8, _flag_C8);
-            emit_ins(psp_gp, psp_t2, _flag_V8, _flag_V8);
-
-            emit_ins(psp_gp, psp_t1, _flag_N8, _flag_N8);
-            emit_ins(psp_gp, psp_t3, _flag_Z8, _flag_Z8);
+            emit_addu(psp_v0, (psp_gpr_t)regs[0], psp_a1);
+            emit_jal(set_add_flags);
+            emit_move(psp_a0, (psp_gpr_t)regs[0]);
             set_flag_dirty();
         )
         break;
@@ -2010,14 +2098,100 @@ void emitARMOP(opcode &op, const bool last_op)
         break;
     }
 
-    case OP_STMIA:
-    case OP_NOP:
-    case OP_LSR_0:
+    case OP_ADD_S:
+    {
+        // rd = rn + op2, update NZCV
+        int32_t regs[3] = {(op.condition != -1) ? op.rd : (op.rd | 0x10), op.rs1, op.rs2};
+        const int nregs = (op.preOpType == PRE_OP_IMM) ? 2 : 3;
+        regman.get(nregs, regs);
+        const psp_gpr_t dst = (op.condition != -1) ? psp_at : (psp_gpr_t)regs[0];
+        conditional_branchless_flags(regs[0], dst, psp_t3, {
+            if (op.preOpType == PRE_OP_IMM) {
+                emit_li(psp_a1, op.imm);
+            } else {
+                arm_preop[getTypeIdx(op.preOpType)]((psp_gpr_t)regs[2], psp_a1, op);
+            }
+            emit_addu(psp_v0, (psp_gpr_t)regs[1], psp_a1);
+            emit_jal(set_add_flags);
+            emit_move(psp_a0, (psp_gpr_t)regs[1]);
+            emit_move(dst, psp_v0);
+        });
+        set_flag_dirty();
+        END_OP_CHKR15(regs[0]);
+        break;
+    }
+
+    case OP_SUB_S:
+    {
+        // rd = rn - op2, update NZCV
+        int32_t regs[3] = {(op.condition != -1) ? op.rd : (op.rd | 0x10), op.rs1, op.rs2};
+        const int nregs = (op.preOpType == PRE_OP_IMM) ? 2 : 3;
+        regman.get(nregs, regs);
+        const psp_gpr_t dst = (op.condition != -1) ? psp_at : (psp_gpr_t)regs[0];
+        conditional_branchless_flags(regs[0], dst, psp_t3, {
+            if (op.preOpType == PRE_OP_IMM) {
+                emit_li(psp_a1, op.imm);
+            } else {
+                arm_preop[getTypeIdx(op.preOpType)]((psp_gpr_t)regs[2], psp_a1, op);
+            }
+            emit_subu(psp_v0, (psp_gpr_t)regs[1], psp_a1);
+            emit_jal(set_sub_flags);
+            emit_move(psp_a0, (psp_gpr_t)regs[1]);
+            emit_move(dst, psp_v0);
+        });
+        set_flag_dirty();
+        END_OP_CHKR15(regs[0]);
+        break;
+    }
+
     case OP_AND_S:
     case OP_EOR_S:
     case OP_ORR_S:
-    case OP_ADD_S:
-    case OP_SUB_S:
+    {
+        // rd = rn AND/EOR/ORR op2, update NZ (C,V from barrel shifter; keep existing for now)
+        int32_t regs[3] = {(op.condition != -1) ? op.rd : (op.rd | 0x10), op.rs1, op.rs2};
+        const int nregs = (op.preOpType == PRE_OP_IMM) ? 2 : 3;
+        regman.get(nregs, regs);
+        const psp_gpr_t dst = (op.condition != -1) ? psp_at : (psp_gpr_t)regs[0];
+        const int logic_op = op._op;
+        conditional_branchless_flags(regs[0], dst, psp_t3, {
+            if (op.preOpType == PRE_OP_IMM) {
+                emit_li(psp_t0, op.imm);
+            } else {
+                arm_preop[getTypeIdx(op.preOpType)]((psp_gpr_t)regs[2], psp_t0, op);
+            }
+            if (logic_op == OP_AND_S)
+                emit_and(dst, (psp_gpr_t)regs[1], psp_t0);
+            else if (logic_op == OP_EOR_S)
+                emit_xor(dst, (psp_gpr_t)regs[1], psp_t0);
+            else
+                emit_or(dst, (psp_gpr_t)regs[1], psp_t0);
+            emit_jal(set_op_logic_flags);
+            emit_move(psp_v0, dst);
+            // C from barrel shifter. set_op_logic_flags only writes N/Z, so the
+            // carry stays whatever it was. For the immediate form the shifter
+            // carry is a decode-time constant: rotate==0 keeps C, rotate!=0
+            // sets C = bit31 of the rotated immediate.
+            if (op.preOpType == PRE_OP_IMM) {
+                const u32 rotate = (op.bytes >> 8) & 0xF;
+                if (rotate) {
+                    if ((op.imm >> 31) & 1) {
+                        emit_li(psp_t1, 1);
+                        emit_ins(psp_gp, psp_t1, _flag_C8, 1);
+                    } else {
+                        emit_ins(psp_gp, psp_zero, _flag_C8, 1);
+                    }
+                }
+            }
+        });
+        set_flag_dirty();
+        END_OP_CHKR15(regs[0]);
+        break;
+    }
+
+    case OP_STMIA:
+    case OP_NOP:
+    case OP_LSR_0:
     case OP_MOV_S:
     case OP_MVN_S:
     case OP_NEG:

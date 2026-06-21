@@ -9,7 +9,12 @@
 // s5/s6/s7 were previously unused; adding them grows the cache 4->7 slots,
 // which sharply cuts spill/reload traffic for multi-operand ARM ops (LDM/STM,
 // 3-operand ALU) that used to thrash the whole cache every instruction.
+#if JIT_CYCLES_IN_REG
+// s3 is reserved as RCYC (cycle accumulator held across the chain): 6 cache slots.
+static const psp_gpr_t SRA_REGS[] = { psp_s0, psp_s1, psp_s2, psp_s5, psp_s6, psp_s7 };
+#else
 static const psp_gpr_t SRA_REGS[] = { psp_s0, psp_s1, psp_s2, psp_s3, psp_s5, psp_s6, psp_s7 };
+#endif
 static const int SRA_REG_COUNT = (int)(sizeof(SRA_REGS) / sizeof(SRA_REGS[0]));
 
 class register_manager

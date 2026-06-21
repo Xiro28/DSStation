@@ -36,6 +36,10 @@ static volatile u32 *mem = nullptr;
 #define syncDrawSc (mem[1])
 #define syncDrawMe (mem[2])
 #define syncTrue (mem[3])
+// Closed-loop sync: CPU bumps framesSubmitted on each draw request,
+// ME bumps framesCompleted when it finishes. lag = submitted - completed.
+#define framesSubmitted (mem[4])
+#define framesCompleted (mem[5])
 
 struct DMADescriptor
 {
@@ -80,11 +84,12 @@ __attribute__((noinline, aligned(4))) static int meLoop()
 
       skip = !skip;
 
-      // memcpy(&((u32*)ME_EDRAM_BASE)[0], &((u32*)GPU_Screen)[0], 192 * 256);
-
-      // meDCacheWritebackRange((u32)GPU_Screen, 192 * 256 * 4);
-      //syncDrawSc = 1;
+      // Only the rendered display buffer needs to reach RAM for the DMA gather,
+      // not the whole cache. Counters live in uncached mem, already coherent.
+      //meDCacheWritebackRange(ME_EDRAM_DISPLAY, (256 * 192 * 4));
       meDCacheWritebackInvalidAll();
+      
+      framesCompleted = framesCompleted + 1;
       asm volatile("sync");
       vrg(0xBC100044) = 1;
     }
@@ -310,8 +315,18 @@ void cpuSendInterrupt()
   sceKernelDcacheWritebackInvalidateRange((void *)&MMU.LCDCenable, sizeof(MMU.ARM9_VMEM) + ((u32)MMU.ARM9_VMEM - (u32)MMU.LCDCenable));
   asm volatile("sync");
 
+  framesSubmitted = framesSubmitted + 1;
   // kcall(&waitChannels);
   start_draw = 1;
+}
+
+// How many frames the CPU has queued that the ME has not finished yet.
+// 0 = ME idle/caught up, grows when the ME falls behind.
+int meFrameLag()
+{
+  if (!mem)
+    return 0;
+  return (int)(framesSubmitted - framesCompleted);
 }
 
 inline u32 *meGetUncached32(const u32 size)
@@ -320,7 +335,7 @@ inline u32 *meGetUncached32(const u32 size)
   if (!_base)
   {
     _base = memalign(16, size * 4);
-    memset(_base, 0, size);
+    memset(_base, 0, size * 4);
     sceKernelDcacheWritebackInvalidateAll();
     return (u32 *)(UNCACHED_USER_MASK | (u32)_base);
   }
@@ -346,7 +361,7 @@ void initMeEngine()
     return;
   }
 
-  mem = meGetUncached32(4);
+  mem = meGetUncached32(8);
 
   lli_to_sc = dmacplusInitLLIs(dmaControlMe2Sc, ME_EDRAM_DISPLAY, GE_EDRAM_BASE, (256 * 192 * 4 + 16) & ~16); // Align to 16 bytes so we don't have to use extra transfer
   lli_to_me_main_gpu = dmacplusInitLLIs(dmaControlSc2Me, (u32)MainScreen.gpu, ME_EDRAM_MAIN_GPU, sizeof(GPU));

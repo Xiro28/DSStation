@@ -39,6 +39,7 @@
 #include "Disassembler.h"
 
 #include <pspsuspend.h>
+#include "aot_cache.h"
 
 u32 saveBlockSizeJIT = 0;
 uint32_t interpreted_cycles = 0;
@@ -416,6 +417,24 @@ typedef INSTR_R (*DynaCompiler)(uint32_t pc, uint32_t opcode);
 #define ARM_OP_IMM(name, PREOP) ARM_OP_IMM_(name, PREOP, REG_POS(i, 12), true)
 #define ARM_OP_REG(name, PREOP) ARM_OP_REG_(name, PREOP, REG_POS(i, 12), true)
 
+// Flag-setting S-ops with rd==15 (e.g. SUBS pc, lr, #4 — return-from-exception)
+// must restore CPSR from SPSR and branch; the JIT codegen doesn't do that, so
+// route the rd==15 case to the interpreter. Mirrors ARM_OP_IMM_/REG_ otherwise.
+#define ARM_OP_S_IMM(name, PREOP)                                                                                                                              \
+   static INSTR_R ARM_OP_##name##_##PREOP(uint32_t pc, const u32 i)                                                                                            \
+   {                                                                                                                                                           \
+      if (REG_POS(i, 12) == 15) return INTERPRET;                                                                                                              \
+      currentBlock.addOP(OP_##name, i, pc, REG_POS(i, 12), REG_POS(i, 16), REG_POS(i, 0), ((i >> 7) & 0x1F), PRE_OP_##PREOP, instr_is_conditional(i) ? CONDITION(i) : -1); \
+      return DYNAREC;                                                                                                                                          \
+   }
+#define ARM_OP_S_REG(name, PREOP)                                                                                                                              \
+   static INSTR_R ARM_OP_##name##_##PREOP(uint32_t pc, const u32 i)                                                                                            \
+   {                                                                                                                                                           \
+      if (REG_POS(i, 12) == 15) return INTERPRET;                                                                                                              \
+      currentBlock.addOP(OP_##name, i, pc, REG_POS(i, 12), REG_POS(i, 16), REG_POS(i, 0), REG_POS(i, 8), PRE_OP_##PREOP, instr_is_conditional(i) ? CONDITION(i) : -1); \
+      return DYNAREC;                                                                                                                                          \
+   }
+
 #define ARM_OP_IMM_NC(name, PREOP) ARM_OP_IMM_(name, PREOP, REG_POS(i, 12), false)
 #define ARM_OP_REG_NC(name, PREOP) ARM_OP_REG_(name, PREOP, REG_POS(i, 12), false)
 
@@ -514,15 +533,19 @@ static INSTR_R ARM_OP_BIC_IMM_VAL(uint32_t pc, const u32 i)
    return DYNAREC;
 }
 
-static INSTR_R ARM_OP_SBC_LSL_IMM(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_SBC_LSL_REG(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_SBC_LSR_IMM(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_SBC_LSR_REG(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_SBC_ASR_IMM(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_SBC_ASR_REG(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_SBC_ROR_REG(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_SBC_IMM_VAL(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_SBC_ROR_IMM(uint32_t pc, const u32 i) { return INTERPRET; }
+ARM_OP_IMM(SBC, LSL_IMM)
+ARM_OP_REG(SBC, LSL_REG)
+ARM_OP_IMM(SBC, LSR_IMM)
+ARM_OP_REG(SBC, LSR_REG)
+ARM_OP_IMM(SBC, ASR_IMM)
+ARM_OP_REG(SBC, ASR_REG)
+ARM_OP_REG(SBC, ROR_REG)
+static INSTR_R ARM_OP_SBC_IMM_VAL(uint32_t pc, const u32 i)
+{
+   currentBlock.addOP(OP_SBC, i, pc, REG_POS(i, 12), REG_POS(i, 16), -1, ROR((i & 0xFF), (i >> 7) & 0x1E), PRE_OP_IMM, instr_is_conditional(i) ? CONDITION(i) : -1, EXTFL_NONE);
+   return DYNAREC;
+}
+ARM_OP_IMM(SBC, ROR_IMM)
 
 ARM_OP_IMM(RSB, LSL_IMM)
 ARM_OP_REG(RSB, LSL_REG)
@@ -538,25 +561,33 @@ static INSTR_R ARM_OP_RSB_IMM_VAL(uint32_t pc, const u32 i)
    return DYNAREC;
 }
 
-static INSTR_R ARM_OP_RSC_LSL_IMM(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_RSC_LSL_REG(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_RSC_LSR_IMM(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_RSC_LSR_REG(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_RSC_ASR_IMM(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_RSC_ASR_REG(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_RSC_ROR_IMM(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_RSC_ROR_REG(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_RSC_IMM_VAL(uint32_t pc, const u32 i) { return INTERPRET; }
+ARM_OP_IMM(RSC, LSL_IMM)
+ARM_OP_REG(RSC, LSL_REG)
+ARM_OP_IMM(RSC, LSR_IMM)
+ARM_OP_REG(RSC, LSR_REG)
+ARM_OP_IMM(RSC, ASR_IMM)
+ARM_OP_REG(RSC, ASR_REG)
+ARM_OP_IMM(RSC, ROR_IMM)
+ARM_OP_REG(RSC, ROR_REG)
+static INSTR_R ARM_OP_RSC_IMM_VAL(uint32_t pc, const u32 i)
+{
+   currentBlock.addOP(OP_RSC, i, pc, REG_POS(i, 12), REG_POS(i, 16), -1, ROR((i & 0xFF), (i >> 7) & 0x1E), PRE_OP_IMM, instr_is_conditional(i) ? CONDITION(i) : -1, EXTFL_NONE);
+   return DYNAREC;
+}
 
-static INSTR_R ARM_OP_ADC_LSL_IMM(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_ADC_LSL_REG(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_ADC_LSR_IMM(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_ADC_LSR_REG(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_ADC_ASR_IMM(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_ADC_ASR_REG(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_ADC_ROR_IMM(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_ADC_ROR_REG(uint32_t pc, const u32 i) { return INTERPRET; }
-static INSTR_R ARM_OP_ADC_IMM_VAL(uint32_t pc, const u32 i) { return INTERPRET; }
+ARM_OP_IMM(ADC, LSL_IMM)
+ARM_OP_REG(ADC, LSL_REG)
+ARM_OP_IMM(ADC, LSR_IMM)
+ARM_OP_REG(ADC, LSR_REG)
+ARM_OP_IMM(ADC, ASR_IMM)
+ARM_OP_REG(ADC, ASR_REG)
+ARM_OP_IMM(ADC, ROR_IMM)
+ARM_OP_REG(ADC, ROR_REG)
+static INSTR_R ARM_OP_ADC_IMM_VAL(uint32_t pc, const u32 i)
+{
+   currentBlock.addOP(OP_ADC, i, pc, REG_POS(i, 12), REG_POS(i, 16), -1, ROR((i & 0xFF), (i >> 7) & 0x1E), PRE_OP_IMM, instr_is_conditional(i) ? CONDITION(i) : -1, EXTFL_NONE);
+   return DYNAREC;
+}
 
 //-----------------------------------------------------------------------------
 //   MOV
@@ -612,9 +643,10 @@ ARM_OP_IMM(TST, ASR_IMM)
 ARM_OP_REG(TST, ASR_REG)
 ARM_OP_IMM(TST, ROR_IMM)
 ARM_OP_REG(TST, ROR_REG)
-static INSTR_R ARM_OP_TST_IMM_VAL(uint32_t pc, const u32 i) // TS3 crasha qui
+static INSTR_R ARM_OP_TST_IMM_VAL(uint32_t pc, const u32 i)
 {
-   if (!full_block)
+   // Same pattern as CMP/CMN: keep the full_block gate, add the Rn==R15 guard.
+   if (REG_POS(i, 16) == 15 || !full_block)
       return INTERPRET;
    currentBlock.addOP(OP_TST, i, pc, i, REG_POS(i, 16), -1, ROR((i & 0xFF), (i >> 7) & 0x1E), PRE_OP_IMM, instr_is_conditional(i) ? CONDITION(i) : -1, EXTFL_NONE);
    return DYNAREC;
@@ -630,7 +662,8 @@ ARM_OP_IMM(CMP, ROR_IMM)
 ARM_OP_REG(CMP, ROR_REG)
 static INSTR_R ARM_OP_CMP_IMM_VAL(uint32_t pc, const u32 i)
 {
-      if (!full_block)
+   // ISOLATION: CMP re-enabled in partial blocks (Rn=R15 guarded); LDRi stays off.
+   if (REG_POS(i, 16) == 15 || !full_block)
       return INTERPRET;
 
    currentBlock.addOP(OP_CMP, i, pc, i, REG_POS(i, 16), -1, ROR((i & 0xFF), (i >> 7) & 0x1E), PRE_OP_IMM, instr_is_conditional(i) ? CONDITION(i) : -1, EXTFL_NONE);
@@ -647,7 +680,8 @@ ARM_OP_IMM(CMN, ROR_IMM)
 ARM_OP_REG(CMN, ROR_REG)
 static INSTR_R ARM_OP_CMN_IMM_VAL(uint32_t pc, const u32 i)
 {
-   return INTERPRET;
+   if (REG_POS(i, 16) == 15 || !full_block)
+      return INTERPRET;
    currentBlock.addOP(OP_CMN, i, pc, i, REG_POS(i,16), -1, ROR((i&0xFF), (i>>7)&0x1E), PRE_OP_IMM, instr_is_conditional(i) ? CONDITION(i) : -1,EXTFL_NONE);
    return DYNAREC;
 }
@@ -655,17 +689,157 @@ static INSTR_R ARM_OP_CMN_IMM_VAL(uint32_t pc, const u32 i)
 // ARM_OP_UNDEF(CMP );
 // ARM_OP_UNDEF(TST );
 
-ARM_OP_UNDEF(AND_S);
-ARM_OP_UNDEF(EOR_S);
-ARM_OP_UNDEF(SUB_S);
+// --- BISECT: S-ops temporarily routed to interpreter ---
+// Set to 0 to re-enable the JIT codegen for a group.
+#define JIT_AND_S 0
+#define JIT_EOR_S 0
+#define JIT_SUB_S 0
+#define JIT_ADD_S 0
+#define JIT_ORR_S 0
+
+// AND_S / ANDS
+#if JIT_AND_S
+ARM_OP_IMM(AND_S, LSL_IMM)
+ARM_OP_REG(AND_S, LSL_REG)
+ARM_OP_IMM(AND_S, LSR_IMM)
+ARM_OP_REG(AND_S, LSR_REG)
+ARM_OP_IMM(AND_S, ASR_IMM)
+ARM_OP_REG(AND_S, ASR_REG)
+ARM_OP_IMM(AND_S, ROR_IMM)
+ARM_OP_REG(AND_S, ROR_REG)
+static INSTR_R ARM_OP_AND_S_IMM_VAL(uint32_t pc, const u32 i)
+{
+   currentBlock.addOP(OP_AND_S, i, pc, REG_POS(i,12), REG_POS(i,16), -1, ROR((i&0xFF),(i>>7)&0x1E), PRE_OP_IMM, instr_is_conditional(i)?CONDITION(i):-1, EXTFL_NONE);
+   return DYNAREC;
+}
+#else
+disable_op(AND_S, LSL_IMM)
+disable_op(AND_S, LSL_REG)
+disable_op(AND_S, LSR_IMM)
+disable_op(AND_S, LSR_REG)
+disable_op(AND_S, ASR_IMM)
+disable_op(AND_S, ASR_REG)
+disable_op(AND_S, ROR_IMM)
+disable_op(AND_S, ROR_REG)
+static INSTR_R ARM_OP_AND_S_IMM_VAL(uint32_t pc, const u32 i) { return INTERPRET; }
+#endif
+
+// EOR_S / EORS
+#if JIT_EOR_S
+ARM_OP_IMM(EOR_S, LSL_IMM)
+ARM_OP_REG(EOR_S, LSL_REG)
+ARM_OP_IMM(EOR_S, LSR_IMM)
+ARM_OP_REG(EOR_S, LSR_REG)
+ARM_OP_IMM(EOR_S, ASR_IMM)
+ARM_OP_REG(EOR_S, ASR_REG)
+ARM_OP_IMM(EOR_S, ROR_IMM)
+ARM_OP_REG(EOR_S, ROR_REG)
+static INSTR_R ARM_OP_EOR_S_IMM_VAL(uint32_t pc, const u32 i)
+{
+   currentBlock.addOP(OP_EOR_S, i, pc, REG_POS(i,12), REG_POS(i,16), -1, ROR((i&0xFF),(i>>7)&0x1E), PRE_OP_IMM, instr_is_conditional(i)?CONDITION(i):-1, EXTFL_NONE);
+   return DYNAREC;
+}
+#else
+disable_op(EOR_S, LSL_IMM)
+disable_op(EOR_S, LSL_REG)
+disable_op(EOR_S, LSR_IMM)
+disable_op(EOR_S, LSR_REG)
+disable_op(EOR_S, ASR_IMM)
+disable_op(EOR_S, ASR_REG)
+disable_op(EOR_S, ROR_IMM)
+disable_op(EOR_S, ROR_REG)
+static INSTR_R ARM_OP_EOR_S_IMM_VAL(uint32_t pc, const u32 i) { return INTERPRET; }
+#endif
+
+// SUB_S / SUBS
+#if JIT_SUB_S
+ARM_OP_S_IMM(SUB_S, LSL_IMM)
+ARM_OP_S_REG(SUB_S, LSL_REG)
+ARM_OP_S_IMM(SUB_S, LSR_IMM)
+ARM_OP_S_REG(SUB_S, LSR_REG)
+ARM_OP_S_IMM(SUB_S, ASR_IMM)
+ARM_OP_S_REG(SUB_S, ASR_REG)
+ARM_OP_S_IMM(SUB_S, ROR_IMM)
+ARM_OP_S_REG(SUB_S, ROR_REG)
+static INSTR_R ARM_OP_SUB_S_IMM_VAL(uint32_t pc, const u32 i)
+{
+   if (REG_POS(i, 12) == 15) return INTERPRET;
+   currentBlock.addOP(OP_SUB_S, i, pc, REG_POS(i,12), REG_POS(i,16), -1, ROR((i&0xFF),(i>>7)&0x1E), PRE_OP_IMM, instr_is_conditional(i)?CONDITION(i):-1, EXTFL_NONE);
+   return DYNAREC;
+}
+#else
+disable_op(SUB_S, LSL_IMM)
+disable_op(SUB_S, LSL_REG)
+disable_op(SUB_S, LSR_IMM)
+disable_op(SUB_S, LSR_REG)
+disable_op(SUB_S, ASR_IMM)
+disable_op(SUB_S, ASR_REG)
+disable_op(SUB_S, ROR_IMM)
+disable_op(SUB_S, ROR_REG)
+static INSTR_R ARM_OP_SUB_S_IMM_VAL(uint32_t pc, const u32 i) { return INTERPRET; }
+#endif
+
+// ADD_S / ADDS
+#if JIT_ADD_S
+ARM_OP_S_IMM(ADD_S, LSL_IMM)
+ARM_OP_S_REG(ADD_S, LSL_REG)
+ARM_OP_S_IMM(ADD_S, LSR_IMM)
+ARM_OP_S_REG(ADD_S, LSR_REG)
+ARM_OP_S_IMM(ADD_S, ASR_IMM)
+ARM_OP_S_REG(ADD_S, ASR_REG)
+ARM_OP_S_IMM(ADD_S, ROR_IMM)
+ARM_OP_S_REG(ADD_S, ROR_REG)
+static INSTR_R ARM_OP_ADD_S_IMM_VAL(uint32_t pc, const u32 i)
+{
+   if (REG_POS(i, 12) == 15) return INTERPRET;
+   currentBlock.addOP(OP_ADD_S, i, pc, REG_POS(i,12), REG_POS(i,16), -1, ROR((i&0xFF),(i>>7)&0x1E), PRE_OP_IMM, instr_is_conditional(i)?CONDITION(i):-1, EXTFL_NONE);
+   return DYNAREC;
+}
+#else
+disable_op(ADD_S, LSL_IMM)
+disable_op(ADD_S, LSL_REG)
+disable_op(ADD_S, LSR_IMM)
+disable_op(ADD_S, LSR_REG)
+disable_op(ADD_S, ASR_IMM)
+disable_op(ADD_S, ASR_REG)
+disable_op(ADD_S, ROR_IMM)
+disable_op(ADD_S, ROR_REG)
+static INSTR_R ARM_OP_ADD_S_IMM_VAL(uint32_t pc, const u32 i) { return INTERPRET; }
+#endif
+
+// ORR_S / ORRS
+#if JIT_ORR_S
+ARM_OP_IMM(ORR_S, LSL_IMM)
+ARM_OP_REG(ORR_S, LSL_REG)
+ARM_OP_IMM(ORR_S, LSR_IMM)
+ARM_OP_REG(ORR_S, LSR_REG)
+ARM_OP_IMM(ORR_S, ASR_IMM)
+ARM_OP_REG(ORR_S, ASR_REG)
+ARM_OP_IMM(ORR_S, ROR_IMM)
+ARM_OP_REG(ORR_S, ROR_REG)
+static INSTR_R ARM_OP_ORR_S_IMM_VAL(uint32_t pc, const u32 i)
+{
+   currentBlock.addOP(OP_ORR_S, i, pc, REG_POS(i,12), REG_POS(i,16), -1, ROR((i&0xFF),(i>>7)&0x1E), PRE_OP_IMM, instr_is_conditional(i)?CONDITION(i):-1, EXTFL_NONE);
+   return DYNAREC;
+}
+#else
+disable_op(ORR_S, LSL_IMM)
+disable_op(ORR_S, LSL_REG)
+disable_op(ORR_S, LSR_IMM)
+disable_op(ORR_S, LSR_REG)
+disable_op(ORR_S, ASR_IMM)
+disable_op(ORR_S, ASR_REG)
+disable_op(ORR_S, ROR_IMM)
+disable_op(ORR_S, ROR_REG)
+static INSTR_R ARM_OP_ORR_S_IMM_VAL(uint32_t pc, const u32 i) { return INTERPRET; }
+#endif
+
 ARM_OP_UNDEF(RSB_S);
-ARM_OP_UNDEF(ADD_S);
 ARM_OP_UNDEF(ADC_S);
 ARM_OP_UNDEF(SBC_S);
 ARM_OP_UNDEF(RSC_S);
 ARM_OP_UNDEF(TEQ);
 //ARM_OP_UNDEF(CMN);
-ARM_OP_UNDEF(ORR_S);
 ARM_OP_UNDEF(MOV_S);
 ARM_OP_UNDEF(BIC_S);
 ARM_OP_UNDEF(MVN_S);
@@ -855,7 +1029,11 @@ u32 get_addr(u32 addr, s32 shift_op, u32 type, u32 i)
 #define GEN_ARM_LDR_OP_FUNC(Name, MODE, VAL)                                           \
    static INSTR_R Name(uint32_t pc, const u32 i)                                       \
    {                                                                                   \
-      if (!full_block || (MODE != PRE_OP_IMM && MODE != PRE_OP_IMM_PRE_P && MODE != PRE_OP_IMM_PRE_M && MODE != PRE_OP_IMM_POST_P && MODE != PRE_OP_IMM_POST_M))                                                                 \
+      /* Only the plain immediate-OFFSET load (MODE==PRE_OP_IMM, P=1 W=0) is correct \
+         in partial blocks; pre/post-index + writeback forms double the writeback and \
+         compute the wrong address (difftest), so leave those to the interpreter. R15 \
+         base/dest also interprets. This is the common LDR [Rn,#imm]. */               \
+      if (!full_block && (MODE != PRE_OP_IMM || REG_POS(i, 12) == 15 || REG_POS(i, 16) == 15)) \
          return INTERPRET;                                                             \
       interpreted_cycles += 2;                                                         \
       u32 val = get_addr(_ARMPROC.R[REG_POS(i, 16)], VAL, MODE, i);                    \
@@ -863,7 +1041,7 @@ u32 get_addr(u32 addr, s32 shift_op, u32 type, u32 i)
                          VAL,                                                          \
                          (opType)MODE,                                                 \
                          instr_is_conditional(i) ? CONDITION(i) : -1,                  \
-                         isMainMemory(val) ? EXTFL_DIRECTMEMACCESS : EXTFL_NONE);      \
+                         EXTFL_NONE);      \
       return DYNAREC;                                                                  \
    }
 
@@ -931,17 +1109,17 @@ gen_ldr_sub(IMM_OFF_PREIND, PRE_OP_IMM_PRE_P, PRE_OP_IMM_PRE_M)
       u32 val = get_addr(_ARMPROC.R[REG_POS(i, 16)], IMM, PRE_OP, i);                                                                                          \
       if (!full_block)                                                                                                                                         \
          return INTERPRET;                                                                                                                                     \
-      if (is3DCMD(val))                                                                                                                                        \
+      if (!full_block && is3DCMD(val))                                                                                                                                        \
       {                                                                                                                                                        \
          currentBlock.addOP(OP_3D_CMD, i, pc, -1, REG_POS(i, 12), -1, val, PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1, EXTFL_NONE);              \
          return DYNAREC;                                                                                                                                       \
       }                                                                                                                                                        \
-      else if (is3DFIFO(val))                                                                                                                                  \
+      else if (!full_block && is3DFIFO(val))                                                                                                                                  \
       {                                                                                                                                                        \
          currentBlock.addOP(OP_3D_FIFO, i, pc, -1, REG_POS(i, 12), -1, val, PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1, EXTFL_NONE);             \
          return DYNAREC;                                                                                                                                       \
       }                                                                                                                                                        \
-      else if (PRE_OP == PRE_OP_IMM || PRE_OP == PRE_OP_IMM_PRE_P || PRE_OP == PRE_OP_IMM_PRE_M || PRE_OP == PRE_OP_IMM_POST_P || PRE_OP == PRE_OP_IMM_POST_M) \
+      else if (full_block || (PRE_OP == PRE_OP_IMM || PRE_OP == PRE_OP_IMM_PRE_P || PRE_OP == PRE_OP_IMM_PRE_M || PRE_OP == PRE_OP_IMM_POST_P || PRE_OP == PRE_OP_IMM_POST_M)) \
       {                                                                                                                                                        \
          u32 val = get_addr(_ARMPROC.R[REG_POS(i, 16)], IMM, PRE_OP, i);                                                                                       \
          currentBlock.addOP(OP_TYPE, i, pc, REG_POS(i, 16), REG_POS(i, 12), -1,                                                                                \
@@ -991,35 +1169,28 @@ gen_ldr_sub(IMM_OFF_PREIND, PRE_OP_IMM_PRE_P, PRE_OP_IMM_PRE_M)
 
 #define SIGNEXTEND_24(i) (((s32)i << 8) >> 8)
 
-                                                static INSTR_R ARM_OP_B(uint32_t pc, const u32 i)
+static INSTR_R ARM_OP_B(uint32_t pc, const u32 i)
 {
-
-   return INTERPRET;
-
-   if (CONDITION(i) == 0xF || instr_is_conditional(i) || NDS_ARM9.CPSR.bits.T == 1)
-   {
-   }
+   if (CONDITION(i) == 0xF)   // BLX (immediate) — switches to Thumb
+      return INTERPRET;
 
    currentBlock.JumpOP = true;
 
    u32 off = SIGNEXTEND_24(i);
 
-   if (currentBlock.branch_addr == currentBlock.start_addr)
-      printf("WARNING: B to self\n");
-
    currentBlock.addOP(OP_BC, i, pc, -1, -1, -1, (off << 2), PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
+   if (instr_is_conditional(i))
+      currentBlock.manualPrefetch = true;
 
    return DYNAREC;
 }
 
 static INSTR_R ARM_OP_BL(uint32_t pc, const u32 i)
 {
-   //if (CONDITION(i) == 0xF) // BLX - switches to Thumb, complex
+   if (CONDITION(i) == 0xF)   // BLX
       return INTERPRET;
 
    u32 off = SIGNEXTEND_24(i);
-   u32 target = pc + 8 + (off << 2);
-   printf("[BL] pc=0x%08X target=0x%08X cond=%d\n", pc, target, instr_is_conditional(i) ? (int)CONDITION(i) : -1);
    currentBlock.addOP(OP_BLC, i, pc, -1, -1, -1, (off << 2), PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
    currentBlock.JumpOP = true;
    if (instr_is_conditional(i))
@@ -1767,6 +1938,18 @@ void print_regs()
 
 int executed_cycles = 0;
 
+// Per-16KB-main-RAM-page "contains compiled code" flags (see arm_jit.h).
+u8 jit_mainmem_code[256] = {0};
+
+// Compile-time value of JIT_CYCLES_IN_REG, exported so the menu can reflect it.
+extern "C" const int g_jit_cycles_in_reg = JIT_CYCLES_IN_REG;
+
+// Experimental JIT optimization toggles (default on); see arm_jit.h.
+u8 jit_opt_constprop  = 1;
+u8 jit_opt_condmerge  = 1;
+u8 jit_opt_thumbflags = 1;
+u8 jit_opt_fastmem    = 0;   // experimental: default OFF until difftest-verified
+
 // Return value of the chain: total cycles accumulated.
 extern "C" uint32_t cycles_to_return = 0;
 // Address to jump to when the chain ends (set by run_block_chain).
@@ -1807,7 +1990,33 @@ exit_chain:
    return 0;
 }
 
+// Field/table addresses captured as plain symbols so the asm fast path below can
+// reach struct members without hardcoding (fragile) offsets. Constant initializers
+// (addresses of globals), so no static-init-order concerns.
+extern "C" {
+   uint8_t*    g_idle_loop = (uint8_t*)&NDS_ARM9.idle_loop;
+   uint32_t*   g_freeze    = &NDS_ARM9.freeze;
+   uint32_t*   g_freezebus = (uint32_t*)&nds.freezeBus;
+   uint32_t*   g_instr_adr = &NDS_ARM9.instruct_adr;
+   uintptr_t** g_jit_mem   = JIT.JIT_MEM;
+}
+
+// Cold path of the dispatcher: the next block isn't compiled yet. The asm fast
+// path has already updated executed_cycles, so we must NOT touch it here. Returns
+// the compiled block pointer, or 0 to end the chain.
+extern "C" uint32_t continue_cpu_compile(void)
+{
+   uint32_t cb = (uint32_t)JIT_COMPILED_FUNC(NDS_ARM9.instruct_adr, ARM9);
+   if (cb)
+      return cb;
+   if (GetFreeSpace() < 4 * 1024)
+      return 0;
+   arm_jit_compile<ARM9>();
+   return (uint32_t)JIT_COMPILED_FUNC(NDS_ARM9.instruct_adr, ARM9);
+}
+
 extern "C" void continue_cpu_dispatch(void);
+extern "C" void continue_cpu_dispatch_exit(void);
 extern "C" uint32_t run_block_chain(armcpu_t *armproc, uintptr_t first_block);
 
 asm(
@@ -1818,27 +2027,115 @@ asm(
 
    // continue_cpu_dispatch — tail-call thunk between JIT blocks.
    // $a0 = cycles of the block that just finished.
-   // Calls continue_cpu_check; if it returns 0 the chain ends,
-   // otherwise it's the pointer to the next block (tail-jumped to).
+   // Fast path entirely in asm: accumulate cycles, run the early-exit checks and
+   // the JIT_COMPILED_FUNC lookup, and tail-jump straight to the next block — no
+   // C call, no stack frame. Only the cold "block not compiled yet" case calls C
+   // (continue_cpu_compile). Live across this point: $k0 = &ARMPROC (guest regs
+   // and flags are spilled to ARMPROC at block end, so only $k0 must survive).
+   // Scratch used: $v0,$v1,$a1,$t0-$t9 (all caller-saved / not guest state).
    ".globl continue_cpu_dispatch\n"
    ".ent   continue_cpu_dispatch\n"
    "continue_cpu_dispatch:\n"
-   "   addiu  $sp, $sp, -8\n"
-   "   sw     $ra, 4($sp)\n"
-   "   jal    continue_cpu_check\n"
+#if JIT_CYCLES_IN_REG
+   // RCYC ($s3) += $a0   (running cycle total, live across the chain)
+   "   addu   $s3, $s3, $a0\n"
+   "   lui    $t8, %hi(arm9)\n"
+   "   lw     $t0, %lo(arm9)($t8)\n"
+   "   addu   $t0, $t0, $s3\n"
+#else
+   // executed_cycles += $a0   ($v1 keeps the running total)
+   "   lui    $t9, %hi(executed_cycles)\n"
+   "   lw     $v1, %lo(executed_cycles)($t9)\n"
+   "   addu   $v1, $v1, $a0\n"
+   "   sw     $v1, %lo(executed_cycles)($t9)\n"
+   // if ((arm9 + executed_cycles) > s32next) end chain
+   "   lui    $t8, %hi(arm9)\n"
+   "   lw     $t0, %lo(arm9)($t8)\n"
+   "   addu   $t0, $t0, $v1\n"
+#endif
+   "   lui    $t8, %hi(s32next)\n"
+   "   lw     $t1, %lo(s32next)($t8)\n"
+   "   slt    $t2, $t1, $t0\n"
+   "   bne    $t2, $zero, .Lccd_exit\n"
    "   nop\n"
-   "   lw     $ra, 4($sp)\n"
-   "   addiu  $sp, $sp, 8\n"
+   // if (NDS_ReschedulePtr) end chain   (bool at absolute 0x00010080)
+   "   lui    $t8, 0x0001\n"
+   "   lbu    $t3, 0x0080($t8)\n"
+   "   bne    $t3, $zero, .Lccd_exit\n"
+   "   nop\n"
+   // if (NDS_ARM9.idle_loop) end chain
+   "   lui    $t8, %hi(g_idle_loop)\n"
+   "   lw     $t8, %lo(g_idle_loop)($t8)\n"
+   "   lbu    $t3, 0($t8)\n"
+   "   bne    $t3, $zero, .Lccd_exit\n"
+   "   nop\n"
+   // if (NDS_ARM9.freeze & CPU_FREEZE_IRQ_IE_IF) end chain
+   "   lui    $t8, %hi(g_freeze)\n"
+   "   lw     $t8, %lo(g_freeze)($t8)\n"
+   "   lw     $t3, 0($t8)\n"
+   "   andi   $t3, $t3, 0x0003\n"
+   "   bne    $t3, $zero, .Lccd_exit\n"
+   "   nop\n"
+   // if (nds.freezeBus) end chain
+   "   lui    $t8, %hi(g_freezebus)\n"
+   "   lw     $t8, %lo(g_freezebus)($t8)\n"
+   "   lw     $t3, 0($t8)\n"
+   "   bne    $t3, $zero, .Lccd_exit\n"
+   "   nop\n"
+   // $a1 = NDS_ARM9.instruct_adr
+   "   lui    $t8, %hi(g_instr_adr)\n"
+   "   lw     $t8, %lo(g_instr_adr)($t8)\n"
+   "   lw     $a1, 0($t8)\n"
+   // page*4 = (instruct_adr & 0x0FFFC000) >> 12 ; t6 = JIT_MEM[page]
+   "   lui    $t4, 0x0FFF\n"
+   "   ori    $t4, $t4, 0xC000\n"
+   "   and    $t5, $a1, $t4\n"
+   "   srl    $t5, $t5, 12\n"
+   "   lui    $t8, %hi(g_jit_mem)\n"
+   "   lw     $t6, %lo(g_jit_mem)($t8)\n"
+   "   addu   $t6, $t6, $t5\n"
+   "   lw     $t6, 0($t6)\n"
+   // entry = JIT_MEM[page][ (instruct_adr & 0x3FFE) >> 1 ]
+   "   andi   $t7, $a1, 0x3FFE\n"
+   "   sll    $t7, $t7, 1\n"               // ((x>>1)<<2) == x<<1
+   "   addu   $t6, $t6, $t7\n"
+   "   lw     $v0, 0($t6)\n"
+   "   beq    $v0, $zero, .Lccd_compile\n"
+   "   nop\n"
+   "   jr     $v0\n"                        // fast: tail-jump to next block
+   "   nop\n"
+   ".Lccd_compile:\n"
+   "   jal    continue_cpu_compile\n"       // cold: compile the next block
+   "   nop\n"
    "   beq    $v0, $zero, .Lccd_exit\n"
    "   nop\n"
-   "   jr     $v0\n"           // tail-jump to next block
+   "   jr     $v0\n"
    "   nop\n"
+   // continue_cpu_dispatch_exit: public entry into the exit stub so inlined
+   // dispatch code in JIT blocks can j here without going through the full dispatch.
+   ".globl continue_cpu_dispatch_exit\n"
+   "continue_cpu_dispatch_exit:\n"
    ".Lccd_exit:\n"
-   "   lui    $at, %hi(dispatcher_ra)\n"
-   "   lw     $ra, %lo(dispatcher_ra)($at)\n"
-   "   lui    $at, %hi(cycles_to_return)\n"
+#if JIT_CYCLES_IN_REG
+   // $v0 = RCYC; cycles_to_return = $v0; executed_cycles = 0
+   // ($v0 set before .Lrbc_resume restores $s3 to the caller's value)
+   "   move   $v0, $s3\n"
+   "   lui    $t9, %hi(executed_cycles)\n"
+   "   sw     $zero, %lo(executed_cycles)($t9)\n"
+   "   lui    $t8, %hi(cycles_to_return)\n"
+   "   sw     $v0, %lo(cycles_to_return)($t8)\n"
+#else
+   // cycles_to_return = executed_cycles; executed_cycles = 0; $v0 = cycles
+   "   lui    $t9, %hi(executed_cycles)\n"
+   "   lw     $v0, %lo(executed_cycles)($t9)\n"
+   "   sw     $zero, %lo(executed_cycles)($t9)\n"
+   "   lui    $t8, %hi(cycles_to_return)\n"
+   "   sw     $v0, %lo(cycles_to_return)($t8)\n"
+#endif
+   "   lui    $t8, %hi(dispatcher_ra)\n"
+   "   lw     $ra, %lo(dispatcher_ra)($t8)\n"
    "   jr     $ra\n"
-   "   lw     $v0, %lo(cycles_to_return)($at)\n"  // delay slot: $v0 = total cycles
+   "   nop\n"
    ".end   continue_cpu_dispatch\n"
 
    // run_block_chain — entry point called from armcpu_exec.
@@ -1860,6 +2157,10 @@ asm(
    "   sw     $gp,  4($sp)\n"
    "   sw     $fp,  0($sp)\n"
    "   move   $k0, $a0\n"                         // $k0 = &ARMPROC (preserved across blocks)
+#if JIT_CYCLES_IN_REG
+   "   lui    $t8, %hi(executed_cycles)\n"        // RCYC ($s3) = executed_cycles (chain accumulator)
+   "   lw     $s3, %lo(executed_cycles)($t8)\n"
+#endif
    "   lui    $t9, %hi(.Lrbc_resume)\n"
    "   addiu  $t9, $t9, %lo(.Lrbc_resume)\n"
    "   lui    $t8, %hi(dispatcher_ra)\n"
@@ -1885,6 +2186,86 @@ asm(
    ".set pop\n"
 );
 
+// Emit the inter-block dispatch logic inline into the JIT buffer.
+// next_block: address of the already-compiled next block (direct jump target),
+//             or 0 to fall back to the shared continue_cpu_dispatch runtime lookup.
+// cycles: block cycle count (compile-time constant, so we use addiu not addu $a0).
+// RCPU ($k0) must still hold &ARMPROC as set by run_block_chain.
+#define DISP_HI(x) ((((u32)(x)) + 0x8000) >> 16)
+#define DISP_LO(x) ((s16)((u32)(x)))
+
+static void emit_inline_dispatch(uint32_t cycles, uint32_t next_block)
+{
+   extern s32 s32next;
+   extern s32 arm9;
+
+#if JIT_CYCLES_IN_REG
+   // RCYC holds the running total live across the chain; just add the constant.
+   #define DISP_CYC RCYC
+   if (cycles <= 0x7FFFu)
+      emit_addiu(RCYC, RCYC, cycles);
+   else {
+      emit_li(psp_t0, cycles);
+      emit_addu(RCYC, RCYC, psp_t0);
+   }
+#else
+   // executed_cycles += cycles  (inline immediate — no $a0 passing)
+   #define DISP_CYC psp_v1
+   emit_lui(psp_t9, DISP_HI(&executed_cycles));
+   emit_lw(psp_v1, psp_t9, DISP_LO(&executed_cycles));
+   if (cycles <= 0x7FFFu)
+      emit_addiu(psp_v1, psp_v1, cycles);
+   else {
+      emit_li(psp_t0, cycles);
+      emit_addu(psp_v1, psp_v1, psp_t0);
+   }
+   emit_sw(psp_v1, psp_t9, DISP_LO(&executed_cycles));
+#endif
+
+// If rs == rt (condition FALSE): branch past the j-exit (continue chain).
+// If rs != rt (condition TRUE): fall into j continue_cpu_dispatch_exit.
+#define EMIT_CHECK_EXIT(rs, rt)                                    \
+   emit_beq(rs, rt, (u32)emit_GetPtr() + 16); /* branch past j */ \
+   emit_nop();                                                     \
+   emit_j((u32)continue_cpu_dispatch_exit);                        \
+   emit_nop();
+
+   // if ((arm9 + cycle_total) > s32next) exit
+   emit_lui(psp_t8, DISP_HI(&arm9));
+   emit_lw(psp_t0, psp_t8, DISP_LO(&arm9));
+   emit_addu(psp_t0, psp_t0, DISP_CYC);
+   emit_lui(psp_t8, DISP_HI(&s32next));
+   emit_lw(psp_t1, psp_t8, DISP_LO(&s32next));
+   emit_slt(psp_t2, psp_t1, psp_t0);
+   EMIT_CHECK_EXIT(psp_t2, psp_zero)
+
+   // if (NDS_ReschedulePtr) exit  [at 0x00010080]
+   emit_lui(psp_t8, 0x0001);
+   emit_lbu(psp_t3, psp_t8, 0x0080);
+   EMIT_CHECK_EXIT(psp_t3, psp_zero)
+
+   // if (idle_loop) exit — use RCPU ($k0) directly, no indirection
+   emit_lbu(psp_t3, RCPU, offsetof(armcpu_t, idle_loop));
+   EMIT_CHECK_EXIT(psp_t3, psp_zero)
+
+   // if (freeze & CPU_FREEZE_IRQ_IE_IF) exit
+   emit_lw(psp_t3, RCPU, offsetof(armcpu_t, freeze));
+   emit_andi(psp_t3, psp_t3, 0x0003);
+   EMIT_CHECK_EXIT(psp_t3, psp_zero)
+
+   // if (nds.freezeBus) exit
+   emit_lui(psp_t8, DISP_HI(&nds.freezeBus));
+   emit_lw(psp_t3, psp_t8, DISP_LO(&nds.freezeBus));
+   EMIT_CHECK_EXIT(psp_t3, psp_zero)
+
+#undef EMIT_CHECK_EXIT
+#undef DISP_CYC
+
+   // All checks passed: jump directly to next compiled block.
+   emit_j(next_block);
+   emit_nop();
+}
+
 u32 pre_hle_block_emit()
 {
    return (u32)emit_GetPtr();
@@ -1900,6 +2281,7 @@ void post_hle_block_emit(u32 block_start_addr, u32 base_adr, u32 interpreted_cyc
 
    make_address_range_executable(block_start_addr, (u32)emit_GetPtr());
    JIT_COMPILED_FUNC(base_adr, ARM9) = (uintptr_t)block_start_addr;
+   JIT_MarkCodePage(base_adr);
 }
 
 
@@ -1912,7 +2294,8 @@ void compile_basicblock(bool interpret_only = false)
 
    void *code_ptr = emit_GetPtr();
 
-   const bool isIdle = interpret_only ? false : currentBlock.isIdleLoop(thumb);
+   const bool isIdle = (interpret_only || !my_config.exp_idle_loop)
+                       ? false : currentBlock.isIdleLoop(thumb);
 
    // StartCodeDump();
 
@@ -1928,28 +2311,42 @@ void compile_basicblock(bool interpret_only = false)
          currentBlock.emitArmBlock<PROCNUM>();
       }
 
-      if ((currentBlock.manualPrefetch || currentBlock.JumpOP))
-      {
-         emit_lw(psp_at, RCPU, _next_instr);
-         emit_sw(psp_at, RCPU, _instr_adr);
+      // Always sync instruct_adr ← next_instr so the exit path and dispatch are correct.
+      // For JumpOP/manualPrefetch, next_instr was written by the branch handler.
+      // For sequential blocks, next_instr was stored by the last emit_prefetch call.
+      emit_lw(psp_at, RCPU, _next_instr);
+      emit_sw(psp_at, RCPU, _instr_adr);
 
-      }
-      
    }else {
       ArmOpCompiled f = op_decode[PROCNUM][thumb];
       emit_jal(f);
       emit_nop();
    }
 
-   // Epilogue: write idle_loop flag, load cycle count into $a0, tail-jump to dispatcher.
+   // Epilogue: write idle_loop flag, then dispatch to next block.
    emit_li(psp_at, isIdle ? 1 : 0);
    emit_sb(psp_at, RCPU, offsetof(armcpu_t, idle_loop));
-   emit_li(psp_a0, interpreted_cycles ? interpreted_cycles : 1);
-   emit_j((u32)continue_cpu_dispatch);
-   emit_nop();
+
+   const uint32_t blk_cycles = interpreted_cycles ? interpreted_cycles : 1;
+
+   // For sequential blocks with a known compiled next block, emit dispatch inline:
+   // this eliminates the j→continue_cpu_dispatch hop and turns the lookup into a
+   // compile-time-resolved direct j, removing one indirect jump on the hot path.
+   uint32_t next_block = 0;
+   if (!interpret_only && my_config.exp_block_link && !currentBlock.JumpOP && !currentBlock.manualPrefetch)
+      next_block = (uint32_t)JIT_COMPILED_FUNC(pc, PROCNUM);
+
+   if (next_block) {
+      emit_inline_dispatch(blk_cycles, next_block);
+   } else {
+      emit_li(psp_a0, blk_cycles);
+      emit_j((u32)continue_cpu_dispatch);
+      emit_nop();
+   }
 
    make_address_range_executable((u32)code_ptr, (u32)emit_GetPtr());
    JIT_COMPILED_FUNC(base_adr, PROCNUM) = (uintptr_t)code_ptr;
+   JIT_MarkCodePage(base_adr);
 
    // Align the code to 4 bytes
    while (emit_getCurrAdr() & 0x3)
@@ -2298,6 +2695,10 @@ int before_emitted_sdk = 0;
 template <int PROCNUM>
 u32 arm_jit_compile()
 {
+#if PROFILER_ENABLED
+   extern u32 g_prof_recompiles;
+   g_prof_recompiles++;
+#endif
    block_procnum = PROCNUM;
    interpreted_cycles = 0;
    full_block = false;
@@ -2670,6 +3071,10 @@ void arm_jit_reset(bool enable, bool suppress_msg)
       JITFREE(JIT.ARM9_LCDC);
       JITFREE(JIT.ARM9_BIOS);
 #undef JITFREE
+
+      memset(jit_mainmem_code, 0, sizeof(jit_mainmem_code));
+
+      aot_reregister();
 
       // memset(recompile_counts, 0, sizeof(recompile_counts));
       init_jit_mem();

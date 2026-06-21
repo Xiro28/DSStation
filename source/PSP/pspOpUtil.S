@@ -42,8 +42,43 @@ set_sub_flags:
     INS  $28, $t0, 4, 1   
 
 
-.global  set_and_flags 		
-.set noat 
+.global  set_add_flags
+.set noat
+.set noreorder
+
+set_add_flags:
+    # a0=left(rn), a1=right(op2), v0=alu_out
+    # Matches interpreter OverflowFromADD: b1=(left^out)>>31, b2=!(left^right) [left==right]
+
+    # C: NOT(left) < right  (= carry out)
+    NOR  $t2, $a0, $zero
+    SLTU $t0, $t2, $a1
+    INS  $28, $t0, 5, 1
+
+    # Z
+    SLTIU $t0, $v0, 1
+    INS  $28, $t0, 6, 1
+
+    # N
+    SRL  $t1, $v0, 31
+    INS  $28, $t1, 7, 1
+
+    # V: MUST match the interpreter's OverflowFromADD (armcpu.h), which uses
+    #   b1 = (left ^ alu_out) >> 31 ; b2 = !(left ^ right)  [i.e. left==right].
+    # This is not ARM-spec-correct (spec is sign-bit compare), but the JIT must
+    # be bit-identical to the interpreter or flags diverge across JIT/interp
+    # block boundaries and games crash. Do NOT "fix" to a sign compare here
+    # without also changing the interpreter.
+    XOR  $t0, $a0, $v0
+    SRL  $t1, $t0, 31
+    XOR  $t0, $a0, $a1
+    SLTIU $t2, $t0, 1
+    AND  $t0, $t1, $t2
+    JR   $31
+    INS  $28, $t0, 4, 1
+
+.global  set_and_flags
+.set noat
 .set noreorder
 
 set_and_flags:

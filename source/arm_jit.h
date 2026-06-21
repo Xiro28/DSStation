@@ -51,4 +51,35 @@ extern CACHE_ALIGN JIT_struct JIT;
 
 extern u32 saveBlockSizeJIT;
 
+// One flag per 16KB main-RAM page (4MB / 16KB = 256): set when a JIT block is
+// compiled into that page. DMA into main RAM only needs to invalidate JIT entries
+// for pages that actually contain code; data DMAs to never-compiled pages skip it.
+// Cleared on arm_jit_reset, set wherever a main-RAM block is registered.
+extern u8 jit_mainmem_code[256];
+
+// Experimental JIT optimization toggles (Experimental settings tab). Read during
+// compilation; changing any requires a JIT reset (recompile). Default 1 = on.
+extern u8 jit_opt_constprop;   // constant propagation pass (ARM)
+extern u8 jit_opt_condmerge;   // condition-merge pass (ARM)
+extern u8 jit_opt_thumbflags;  // Thumb dead-flag elimination pass
+extern u8 jit_opt_fastmem;     // inline main-RAM fast path for word LDR (ARM9)
+
+static inline void JIT_MarkCodePage(u32 adr)
+{
+	if ((adr >> 24) == 0x02)
+		jit_mainmem_code[(adr >> 14) & 0xFF] = 1;
+}
+
+// True if any 16KB page touched by [adr, adr+bytes) holds compiled code.
+static inline bool JIT_MainMemRangeHasCode(u32 adr, u32 bytes)
+{
+	u32 page  = (adr >> 14) & 0xFF;
+	u32 last  = ((adr + bytes - 1) >> 14) & 0xFF;
+	u32 count = ((last - page) & 0xFF) + 1;   // wrap-safe page span
+	for (u32 i = 0; i < count; i++)
+		if (jit_mainmem_code[(page + i) & 0xFF])
+			return true;
+	return false;
+}
+
 #endif

@@ -129,8 +129,8 @@ static inline void transformVertex(const VERT &vert, const VIEWPORT &viewport,
     const float vx = (float)viewport.x;
     const float vy = (float)viewport.y;
 
-    // Map NDC [-1,1] → viewport pixels, then offset to correct PSP screen half
-    out.x = (nx + 1.0f) * (vw * 0.5f) + vx + screenX_off;
+    // Map NDC [-1,1] → viewport pixels (256px NDS), scale to PSP half (240px)
+    out.x = ((nx + 1.0f) * (vw * 0.5f) + vx) * (240.0f / 256.0f) + screenX_off;
 
     // FIX: NDS y=+1 is screen TOP; PSP screen y grows downward from y=40.
     // screenY_max = 232 = 40 + 192.
@@ -322,7 +322,7 @@ void SetupTexture(POLY& thePoly)
     // Always set explicitly — leaving the previous poly's func would otherwise
     // leak state across polys and cause flicker/duplication on overlapping geo.
     if (attr.enableDepthTest)
-        sceGuDepthFunc(GU_LEQUAL);
+        sceGuDepthFunc(GU_GEQUAL);  // reversed-Z: larger=closer; equal passes (coplanar = submission order)
     else
         sceGuDepthFunc(GU_ALWAYS);
     sceGuEnable(GU_DEPTH_TEST);
@@ -381,7 +381,7 @@ void SetupTexture(POLY& thePoly)
     if (attr.isTranslucent && !attr.enableAlphaDepthWrite)
         enableDepthWrite = false;
 
-    sceGuDepthMask(enableDepthWrite ? GU_FALSE : GU_TRUE);
+    sceGuDepthMask(enableDepthWrite ? GU_FALSE : GU_TRUE);  // GU_FALSE = writes enabled
 
      if (attr.isTranslucent) {
         // Poligono semitrasparente: alpha test con soglia dal registro NDS
@@ -398,32 +398,69 @@ void SetupTexture(POLY& thePoly)
     }
 }
 
+// Build the PSP GU projection matrix from the NDS projection (mtxCurrent[1]).
+// Two coordinate-space mismatches must be patched:
+//   1. NDS clip-Z is in [0, w]; the GU rasterizer expects OpenGL-style [-w, w].
+//      Pre-multiply by zfix = diag-ish matrix that maps z' = 2z - w, i.e. adds
+//      a row that doubles z and subtracts w.  In column-major terms:
+//        z_out = 2*z_in - w_in  →  column 2 z-term *2, column 3 z-term -1*w.
+//   2. NDS y+1 is screen TOP and our PSP viewport (set below) keeps that
+//      orientation, so no extra flip is needed here — the viewport handles it.
+// NDS matrices are column-major (OpenGL layout), same as the GU, so the 16
+// floats map 1:1 onto ScePspFMatrix4.
+static inline void buildGuProjection(const float* ndsProj, ScePspFMatrix4* out)
+{
+    // zfix * ndsProj.  zfix only touches the output z row, so we can apply it
+    // by post-adjusting the z components of ndsProj's columns:
+    //   z_new[col] = 2*z[col] - w[col]
+    // Toggle to isolate near-plane clipping glitches:
+    //  1 = apply 2z-w remap ([0,w]→[-w,w])
+    //  0 = load NDS projection unchanged (z_ndc stays [0,1]); rely on depthRange
+    #define GU_PROJ_ZFIX 0
+    float* d = (float*)out;
+    for (int c = 0; c < 4; c++) {
+        const float zc = ndsProj[c*4 + 2];
+        const float wc = ndsProj[c*4 + 3];
+        d[c*4 + 0] = ndsProj[c*4 + 0];
+        d[c*4 + 1] = ndsProj[c*4 + 1];
+#if GU_PROJ_ZFIX
+        d[c*4 + 2] = 2.0f * zc - wc;     // [0,w] → [-w,w]
+#else
+        d[c*4 + 2] = zc;                 // leave NDS clip-z as-is ([0,w])
+#endif
+        d[c*4 + 3] = wc;
+    }
+}
+
 FORCEINLINE void mainLoop()
 {
     const size_t polyCount = engine->polylist->count;
     if (polyCount == 0) return;
-	
 
     const bool _3dOnTop   = (MainScreen.offset == 0);
     const float screenX_off = _3dOnTop ? 0.0f : 240.0f;
-    const float screenY_top = 40.0f;
 
     sceGuEnable(GU_DEPTH_TEST);
-    sceGuDepthFunc(GU_LEQUAL);      
-    sceGuDepthMask(GU_FALSE);       // ABILITA la scrittura (False = Scrittura ON su PSP)
-    
-    // Puliamo lo Z-Buffer al valore "LONTANO"
-    sceGuClearDepth(65535);         
-    sceGuClear(GU_DEPTH_BUFFER_BIT | GU_STENCIL_BUFFER_BIT);
+    sceGuDepthRange(0, 65535);    // identity: out.z stored directly (PSPDisplay sets reversed 65535,0)
+    sceGuDepthFunc(GU_GEQUAL);   // near=65535 (large) wins; clear=0 (far) so first poly passes
+    sceGuDepthMask(GU_FALSE);  // SetupPoly sets per-poly depth mask
 
+    sceGuClearDepth(0);   // clear to "far" so first polygon at any depth passes
+    sceGuClear(GU_DEPTH_BUFFER_BIT | GU_STENCIL_BUFFER_BIT);
 
     // FIX B: scissor ai pixel PSP corretti per questo schermo
     sceGuEnable(GU_SCISSOR_TEST);
     sceGuScissor(_3dOnTop ? 0 : 240, 40, _3dOnTop ? 240 : 480, 232);
 
     sceGuEnable(GU_BLEND);
-	sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+    sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
 
+    // ---- 2D transform path (CPU does projection / perspective divide) ----
+    // The hardware-transform (GU_TRANSFORM_3D) path is kept in the code (matrix
+    // pool, rawcoord, buildGuProjection) but disabled: the PSP GU clipper drops
+    // near-plane-straddling triangles, so we transform on the CPU and submit
+    // pre-projected screen-space verts with GU_TRANSFORM_2D, as before.
+    const float screenY_max = 232.0f;
     VIEWPORT viewport;
     u32 lastTexParams   = 0xFFFFFFFF;
     u32 lastTexPalette  = 0xFFFFFFFF;
@@ -461,7 +498,7 @@ FORCEINLINE void mainLoop()
         if (lastPolyAttr != poly.polyAttr) {
             flushBatch();
             lastPolyAttr = poly.polyAttr;
-            polyAttr.setup(poly.polyAttr); 
+            polyAttr.setup(poly.polyAttr);
             SetupPoly(poly);
         }
 
@@ -501,11 +538,7 @@ FORCEINLINE void mainLoop()
         if (skip) continue;
 
         if (VertListIndex + vcnt > VERT_BUF_SIZE) {
-            // Buffer full. Flush what's batched and stop submitting more polys
-            // for this frame — wrapping back to 0 would overwrite vertex data
-            // that previously-queued sceGuDrawArray calls still reference,
-            // causing the GU to read garbage. With VERT_BUF_SIZE=8192 (192KB),
-            // hitting this cap is extremely rare in practice.
+            // Buffer full — flush and stop (see SoftRastInit comment).
             flushBatch();
             break;
         }
@@ -524,25 +557,23 @@ FORCEINLINE void mainLoop()
             out.u = v.u;
             out.v = v.v;
 
-            // Prospettiva
-			const float inv_w = 1.0f / v.w;
-        const float nx = v.x * inv_w;
-        const float ny = v.y * inv_w;
-        
-        // Z normalizzata da 0.0 (vicino) a 1.0 (lontano)
-        float nz = (v.z * inv_w + 1.0f) * 0.5f;
+            // CPU perspective divide + viewport map (screen-space, TRANSFORM_2D)
+            const float inv_w = (v.w != 0.0f) ? (1.0f / v.w) : 0.0f;
+            const float nx = v.x * inv_w;
+            const float ny = v.y * inv_w;
+            // NDS clip-space z is [0,w] → z/w is already [0,1] (0=far, 1=near).
+            // Use full range for max depth precision (no [-1,1] remap).
+            float nz = v.z * inv_w;
 
-        const float vw = viewport.width  ? (float)viewport.width  : 256.0f;
-        const float vh = viewport.height ? (float)viewport.height : 192.0f;
+            const float vw = viewport.width  ? (float)viewport.width  : 256.0f;
+            const float vh = viewport.height ? (float)viewport.height : 192.0f;
 
-        out.x = (nx + 1.0f) * (vw * 0.5f) + viewport.x + screenX_off;
-        out.y = 232.0f - ((ny + 1.0f) * (vh * 0.5f) + viewport.y);
+            out.x = ((nx + 1.0f) * (vw * 0.5f) + viewport.x) * (240.0f / 256.0f) + screenX_off;
+            out.y = screenY_max - ((ny + 1.0f) * (vh * 0.5f) + viewport.y);
 
-        if (nz < 0.0f) nz = 0.0f;
-        if (nz > 1.0f) nz = 1.0f;
-
-        // Distribuiamo la Z sui 16-bit
-        out.z = 65535.0f * nz;
+            if (nz < 0.0f) nz = 0.0f;
+            if (nz > 1.0f) nz = 1.0f;
+            out.z = 65535.0f * nz;  // far=0 (clear value), near=65535; GU_GEQUAL → near wins
         }
 
         if (batching) batched_draws += vcnt;

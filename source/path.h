@@ -30,6 +30,7 @@
 	#endif
 #elif !defined(DESMUME_COCOA)
 //////	#include <glib.h>
+	#include <sys/stat.h>   // mkdir for the PSP STATES/ folder
 #endif /* HOST_WINDOWS */
 
 #include "time.h"
@@ -131,7 +132,14 @@ public:
 #if !defined(WIN32) && !defined(DESMUME_COCOA)
 		ReadPathSettings();
 #endif
-		
+
+#if !defined(WIN32) && !defined(DESMUME_COCOA)
+		// PSP build: keep savestates in a dedicated STATES/ folder (created on
+		// demand) instead of scattering game.ds0 files next to the EBOOT.
+		mkdir("STATES", 0777);                 // no-op if it already exists
+		strncpy(pathToStates, "STATES", MAX_PATH);
+		pathToStates[MAX_PATH - 1] = '\0';
+#endif
 	}
 
 	void LoadModulePath()
@@ -428,16 +436,22 @@ public:
 
 	void SetRomName(const char *filename)
 	{
-		//std::string romPath = filename;
+		// Derive the real ROM name from the full path so each game gets its own
+		// savestate / battery files. Previously hard-coded to "zoo.nds", which
+		// made every ROM share one savestate slot (load = wrong game / crash).
+		std::string romPath = filename ? filename : "";
 
-		RomName = "zoo.nds";//Path::GetFileNameFromPath(romPath);
-
-		//printf("Rom name: %s\n", RomName.c_str());
-		
-        //HCF Invalid characters are removed previously
-        //RomName = Path::ScrubInvalid(RomName);
-		
-        RomDirectory = "ROMS/";//Path::GetFileDirectoryPath(romPath);
+		// basename: strip everything up to the last directory delimiter ('/').
+		size_t slash = romPath.find_last_of(ALL_DIRECTORY_DELIMITER_STRING);
+		if (slash != std::string::npos) {
+			RomName      = romPath.substr(slash + 1);
+			RomDirectory = romPath.substr(0, slash + 1);
+		} else {
+			RomName      = romPath;
+			RomDirectory = "ROMS/";
+		}
+		if (RomName.empty())
+			RomName = "rom.nds";
 	}
 
 	const char *GetRomName()

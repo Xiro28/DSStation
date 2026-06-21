@@ -9,8 +9,18 @@
 
 #define _REG_NUM(i, n)		((i>>(n))&0x7)
 
+// Hold the block-chain cycle accumulator in a callee-saved register ($s3) across
+// the whole chain instead of round-tripping executed_cycles through memory each
+// block. Costs one SRA guest-cache slot (s3 removed from SRA_REGS). Toggle here;
+// keep AOT_VERSION in sync (the emitted dispatch code changes).
+#define JIT_CYCLES_IN_REG 1
+
 #define RCPU   psp_k0
+#if JIT_CYCLES_IN_REG
+#define RCYC   psp_s3
+#else
 #define RCYC   psp_s0
+#endif
 
 static uint32_t block_procnum;
 
@@ -76,6 +86,25 @@ static uint32_t block_procnum;
         else emit_movn(dst, tmp_dst, psp_s4); \
     }
 
+// Like conditional_branchless, but ALSO commits the flag byte ($28 / psp_gp)
+// conditionally. Flag-setting S-ops (ADD_S/SUB_S/AND_S/EOR_S/ORR_S) must leave
+// NZCV untouched when their condition is false. conditional_branchless only
+// guards the destination register; the body here writes flags unconditionally,
+// so we snapshot the old flags into flag_save before the body and restore them
+// when the condition is false, reusing the psp_s4 predicate. flag_save must be a
+// register not clobbered by the body (set_*_flags use t0..t2; pass e.g. psp_t3).
+#define conditional_branchless_flags(dst, tmp_dst, flag_save, x) \
+    if (op.condition != ((uint32_t)-1)) {\
+        if (op.check_condition) generate_condition_check(op.condition);\
+        emit_move(flag_save, psp_gp);\
+    }\
+    {x;} \
+    if (op.condition != ((uint32_t)-1)){\
+        const bool isMovz = (op.condition < 8) ? (op.condition & 1) : !(op.condition & 1);\
+        if (isMovz) { emit_movz(dst, tmp_dst, psp_s4); emit_movn(psp_gp, flag_save, psp_s4); }\
+        else        { emit_movn(dst, tmp_dst, psp_s4); emit_movz(psp_gp, flag_save, psp_s4); }\
+    }
+
 enum op{
     
     // Special custom opcodes
@@ -104,6 +133,9 @@ enum op{
     OP_UMLA,
     OP_CLZ,
     OP_RSB,
+    OP_ADC,
+    OP_SBC,
+    OP_RSC,
     OP_NEG,
     OP_MOV,
     OP_MVN,

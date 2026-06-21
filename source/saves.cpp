@@ -160,9 +160,11 @@ SFORMAT SF_MEM[]={
 	{ "ITCM", 1, sizeof(MMU.ARM9_ITCM),   MMU.ARM9_ITCM},
 	{ "DTCM", 1, sizeof(MMU.ARM9_DTCM),   MMU.ARM9_DTCM},
 
-	 //for legacy purposes, WRAX is a separate variable. shouldnt be a problem.
+	 // This PSP build allocates MAIN_MEM as a single 4MB block (mask 0x3FFFFF).
+	 // The original "WRAX" entry serialized a second 4MB at MAIN_MEM+0x400000,
+	 // which is past the end of the buffer here -> out-of-bounds -> crash.
+	 // The DS only has 4MB main RAM, so WRAM alone is the full, correct state.
 	{ "WRAM", 1, 0x400000, MMU.MAIN_MEM},
-	{ "WRAX", 1, 0x400000, MMU.MAIN_MEM+0x400000},
 
 	//NOTE - this is not as large as the allocated memory.
 	//the memory is overlarge due to the way our memory map system is setup

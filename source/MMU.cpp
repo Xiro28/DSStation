@@ -2645,12 +2645,11 @@ void TransferMemory(u32& saddr, u32& daddr, int todo, const T srcinc, const T ds
 		else */
 		if (src_ptr && dst_ptr) {
 
-			if ((daddr >> 24) == 0x2) {
+			if ((daddr >> 24) == 0x2 && JIT_MainMemRangeHasCode(daddr, todo * SZ))
+				// Invalidate JIT entries only when the destination pages hold code.
+				// (Data DMAs to never-compiled pages skip this entirely.)
 				memset(&JIT_COMPILED_FUNC_KNOWNBANK(daddr, MAIN_MEM, (SZ == 4) ? _MMU_MAIN_MEM_MASK32 : _MMU_MAIN_MEM_MASK16, 0),
 					0, todo);
-				memset(&JIT_COMPILED_FUNC_KNOWNBANK(daddr, MAIN_MEM, (SZ == 4) ? _MMU_MAIN_MEM_MASK32 : _MMU_MAIN_MEM_MASK16, 1),
-					0, todo);
-			}
 
 			if (srcinc == dstinc) {
 				if (srcinc < 0 && dstinc < 0){
@@ -2685,12 +2684,9 @@ void TransferMemory(u32& saddr, u32& daddr, int todo, const T srcinc, const T ds
 
 		} else if (dst_ptr) {
 
-			if ((daddr >> 24) == 0x2) {
+			if ((daddr >> 24) == 0x2 && JIT_MainMemRangeHasCode(daddr, todo * SZ))
 				memset(&JIT_COMPILED_FUNC_KNOWNBANK(daddr, MAIN_MEM, (SZ == 4) ? _MMU_MAIN_MEM_MASK32 : _MMU_MAIN_MEM_MASK16, 0),
 					0, todo);
-				memset(&JIT_COMPILED_FUNC_KNOWNBANK(daddr, MAIN_MEM, (SZ == 4) ? _MMU_MAIN_MEM_MASK32 : _MMU_MAIN_MEM_MASK16, 1),
-					0, todo);
-			}
 
 
 			daddr += dstinc * todo;
@@ -2775,7 +2771,10 @@ void DmaController::doCopy()
 		// TODO Check gxfifo dma in order to speed up 3d games
 
 		default:
-			if (daddr&(~0x3FFF) == MMU.DTCMRegion || (saddr&(~0x3FFF) == MMU.DTCMRegion)) {
+			// NDS DMA cannot access TCM: skip the copy (advance addresses only) when
+			// either endpoint lands in the DTCM region. NOTE: parentheses matter —
+			// '==' binds tighter than '&', so the mask must be parenthesized.
+			if (((daddr & ~0x3FFF) == MMU.DTCMRegion) || ((saddr & ~0x3FFF) == MMU.DTCMRegion)) {
 				dst += dstinc * todo;
 				src += srcinc * todo;
 			}
