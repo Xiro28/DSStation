@@ -858,9 +858,12 @@ static INSTR_R ARM_OP_MLA(uint32_t pc, const u32 i)
 
 static INSTR_R ARM_OP_UMULL(uint32_t pc, const u32 i)
 {
-   return INTERPRET;
+#ifdef JIT_OPT_MULACC
    currentBlock.addOP(OP_UMUL, i, pc, REG_POS(i, 16), REG_POS(i, 0), REG_POS(i, 8), REG_POS(i, 12), PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
    return DYNAREC;
+#else
+   return INTERPRET;
+#endif
 }
 
 static INSTR_R ARM_OP_SMULL(uint32_t pc, const u32 i)
@@ -870,9 +873,12 @@ static INSTR_R ARM_OP_SMULL(uint32_t pc, const u32 i)
 
 static INSTR_R ARM_OP_UMLAL(uint32_t pc, const u32 i)
 {
-   return INTERPRET;
+#ifdef JIT_OPT_MULACC
    currentBlock.addOP(OP_UMLA, i, pc, REG_POS(i, 16), REG_POS(i, 0), REG_POS(i, 8), REG_POS(i, 12), PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
    return DYNAREC;
+#else
+   return INTERPRET;
+#endif
 }
 
 #define ARM_OP_MUL_S 0
@@ -886,15 +892,40 @@ static INSTR_R ARM_OP_UMLAL(uint32_t pc, const u32 i)
 #define ARM_OP_SMLAL 0
 #define ARM_OP_SMLAL_S 0
 
-#define ARM_OP_SMUL_B_B 0
-#define ARM_OP_SMUL_T_B 0
-#define ARM_OP_SMUL_B_T 0
-#define ARM_OP_SMUL_T_T 0
+// SMULxy: Rd = sign16(Rm.x) * sign16(Rs.y)  (bit5=Rm_top, bit6=Rs_top)
+static INSTR_R decode_smulxy(uint32_t pc, const u32 i)
+{
+#ifdef JIT_OPT_SIGNEDMUL16
+   const int32_t sel = (int32_t)(((i >> 5) & 1) | (((i >> 6) & 1) << 1));
+   currentBlock.addOP(OP_SMULXY, i, pc, REG_POS(i, 16), REG_POS(i, 0), REG_POS(i, 8),
+                      sel, PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
+   return DYNAREC;
+#else
+   return INTERPRET;
+#endif
+}
+#define ARM_OP_SMUL_B_B decode_smulxy
+#define ARM_OP_SMUL_T_B decode_smulxy
+#define ARM_OP_SMUL_B_T decode_smulxy
+#define ARM_OP_SMUL_T_T decode_smulxy
 
-#define ARM_OP_SMLA_B_B 0
-#define ARM_OP_SMLA_T_B 0
-#define ARM_OP_SMLA_B_T 0
-#define ARM_OP_SMLA_T_T 0
+// SMLAxy: Rd = (sign16(Rm.x) * sign16(Rs.y)) + Rn  (bit5=Rm_top, bit6=Rs_top, Rn=bits15:12)
+static INSTR_R decode_smlaxy(uint32_t pc, const u32 i)
+{
+#ifdef JIT_OPT_SIGNEDMUL16
+   // Pack: low nibble = Rn register, bits [5:4] = halfword selectors
+   const int32_t packed = (int32_t)(REG_POS(i, 12)) | (int32_t)(((i >> 5) & 3) << 4);
+   currentBlock.addOP(OP_SMLAXY, i, pc, REG_POS(i, 16), REG_POS(i, 0), REG_POS(i, 8),
+                      packed, PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
+   return DYNAREC;
+#else
+   return INTERPRET;
+#endif
+}
+#define ARM_OP_SMLA_B_B decode_smlaxy
+#define ARM_OP_SMLA_T_B decode_smlaxy
+#define ARM_OP_SMLA_B_T decode_smlaxy
+#define ARM_OP_SMLA_T_T decode_smlaxy
 
 #define ARM_OP_SMULW_B 0
 #define ARM_OP_SMULW_T 0
@@ -906,8 +937,27 @@ static INSTR_R ARM_OP_UMLAL(uint32_t pc, const u32 i)
 #define ARM_OP_SMLAL_B_T 0
 #define ARM_OP_SMLAL_T_T 0
 
-#define ARM_OP_QADD 0
-#define ARM_OP_QSUB 0
+// QADD/QSUB: saturating 32-bit add/subtract (Q-flag update omitted)
+static INSTR_R ARM_OP_QADD(uint32_t pc, const u32 i)
+{
+#ifdef JIT_OPT_SATURATE
+   currentBlock.addOP(OP_QADD, i, pc, REG_POS(i, 12), REG_POS(i, 0), REG_POS(i, 16),
+                      -1, PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
+   return DYNAREC;
+#else
+   return INTERPRET;
+#endif
+}
+static INSTR_R ARM_OP_QSUB(uint32_t pc, const u32 i)
+{
+#ifdef JIT_OPT_SATURATE
+   currentBlock.addOP(OP_QSUB, i, pc, REG_POS(i, 12), REG_POS(i, 0), REG_POS(i, 16),
+                      -1, PRE_OP_NONE, instr_is_conditional(i) ? CONDITION(i) : -1);
+   return DYNAREC;
+#else
+   return INTERPRET;
+#endif
+}
 #define ARM_OP_QDADD 0
 #define ARM_OP_QDSUB 0
 
@@ -2222,44 +2272,53 @@ static void emit_inline_dispatch(uint32_t cycles, uint32_t next_block)
    emit_sw(psp_v1, psp_t9, DISP_LO(&executed_cycles));
 #endif
 
-// If rs == rt (condition FALSE): branch past the j-exit (continue chain).
-// If rs != rt (condition TRUE): fall into j continue_cpu_dispatch_exit.
-#define EMIT_CHECK_EXIT(rs, rt)                                    \
-   emit_beq(rs, rt, (u32)emit_GetPtr() + 16); /* branch past j */ \
-   emit_nop();                                                     \
-   emit_j((u32)continue_cpu_dispatch_exit);                        \
-   emit_nop();
+   // Fold every exit condition into a single predicate register ($t2) by OR-ing
+   // them together, then take ONE branch. The old code emitted a separate
+   // branch+delay+j+delay (4 instructions) per condition — 5 of them, ~20 insns
+   // of pure control flow at the tail of every linked block. Here each extra
+   // condition costs a single `or`, and we branch exactly once.
+   //
+   // The conditions are independent and side-effect free, so a logical OR of all
+   // of them is equivalent to "exit if ANY is true". Each term is reduced to a
+   // 0/non-zero value; we never need the individual results past the OR.
 
-   // if ((arm9 + cycle_total) > s32next) exit
+   // term0: (arm9 + cycle_total) > s32next   →  slt(s32next, arm9+cyc) ∈ {0,1}
    emit_lui(psp_t8, DISP_HI(&arm9));
    emit_lw(psp_t0, psp_t8, DISP_LO(&arm9));
    emit_addu(psp_t0, psp_t0, DISP_CYC);
    emit_lui(psp_t8, DISP_HI(&s32next));
    emit_lw(psp_t1, psp_t8, DISP_LO(&s32next));
-   emit_slt(psp_t2, psp_t1, psp_t0);
-   EMIT_CHECK_EXIT(psp_t2, psp_zero)
+   emit_slt(psp_t2, psp_t1, psp_t0);          // t2 = accumulator
 
-   // if (NDS_ReschedulePtr) exit  [at 0x00010080]
+   // term1: NDS_ReschedulePtr  [byte at 0x00010080]
    emit_lui(psp_t8, 0x0001);
    emit_lbu(psp_t3, psp_t8, 0x0080);
-   EMIT_CHECK_EXIT(psp_t3, psp_zero)
+   emit_or(psp_t2, psp_t2, psp_t3);
 
-   // if (idle_loop) exit — use RCPU ($k0) directly, no indirection
+   // term2: idle_loop — RCPU ($k0) directly, no indirection
    emit_lbu(psp_t3, RCPU, offsetof(armcpu_t, idle_loop));
-   EMIT_CHECK_EXIT(psp_t3, psp_zero)
+   emit_or(psp_t2, psp_t2, psp_t3);
 
-   // if (freeze & CPU_FREEZE_IRQ_IE_IF) exit
+   // term3: freeze & CPU_FREEZE_IRQ_IE_IF
    emit_lw(psp_t3, RCPU, offsetof(armcpu_t, freeze));
    emit_andi(psp_t3, psp_t3, 0x0003);
-   EMIT_CHECK_EXIT(psp_t3, psp_zero)
+   emit_or(psp_t2, psp_t2, psp_t3);
 
-   // if (nds.freezeBus) exit
+   // term4: nds.freezeBus
    emit_lui(psp_t8, DISP_HI(&nds.freezeBus));
    emit_lw(psp_t3, psp_t8, DISP_LO(&nds.freezeBus));
-   EMIT_CHECK_EXIT(psp_t3, psp_zero)
+   emit_or(psp_t2, psp_t2, psp_t3);
 
-#undef EMIT_CHECK_EXIT
 #undef DISP_CYC
+
+   // Single exit branch. continue_cpu_dispatch_exit is a fixed function address
+   // that can sit outside relative-branch range, so we keep the short local-branch
+   // over an absolute j: if the predicate is zero, hop past the j and fall into the
+   // direct jump to the next block; otherwise take the j to the dispatcher.
+   emit_beq(psp_t2, psp_zero, (u32)emit_GetPtr() + 16); // branch past the j
+   emit_nop();
+   emit_j((u32)continue_cpu_dispatch_exit);
+   emit_nop();
 
    // All checks passed: jump directly to next compiled block.
    emit_j(next_block);
@@ -2291,6 +2350,14 @@ template <int PROCNUM>
 void compile_basicblock(bool interpret_only = false)
 {
    uint32_t opcode = 0;
+
+   // Align block start to a 64-byte ICache line boundary. This prevents a block
+   // from straddling two cache lines unnecessarily and reduces set-conflict evictions
+   // in the PSP Allegrex 2-way 16KB ICache (64-byte lines, 128 sets).
+   if (my_config.exp_icache_align) {
+      while (emit_getCurrAdr() & 63)
+         emit_nop();
+   }
 
    void *code_ptr = emit_GetPtr();
 
@@ -2329,12 +2396,16 @@ void compile_basicblock(bool interpret_only = false)
 
    const uint32_t blk_cycles = interpreted_cycles ? interpreted_cycles : 1;
 
-   // For sequential blocks with a known compiled next block, emit dispatch inline:
-   // this eliminates the j→continue_cpu_dispatch hop and turns the lookup into a
-   // compile-time-resolved direct j, removing one indirect jump on the hot path.
+   // Determine the next compiled block for inline dispatch:
+   //  1. Early-termination reuse: block building stopped because this PC already
+   //     had a compiled block; jump directly into it (no re-emission).
+   //  2. Block-link: sequential fall-through to an already-compiled block (exp_block_link).
    uint32_t next_block = 0;
-   if (!interpret_only && my_config.exp_block_link && !currentBlock.JumpOP && !currentBlock.manualPrefetch)
+   if (currentBlock.early_exit_compiled_target) {
+      next_block = (uint32_t)currentBlock.early_exit_compiled_target;
+   } else if (!interpret_only && my_config.exp_block_link && !currentBlock.JumpOP && !currentBlock.manualPrefetch) {
       next_block = (uint32_t)JIT_COMPILED_FUNC(pc, PROCNUM);
+   }
 
    if (next_block) {
       emit_inline_dispatch(blk_cycles, next_block);
@@ -2431,15 +2502,26 @@ void build_ArmBasicblock(uint16_t max_opcodes = 128, bool include_branches = fal
 
    full_block = include_branches;
 
+#if defined(JIT_BUILD_HASH) || defined(save_hash)
    uint32_t digest[_SHA1_DIGEST_LENGTH];
-
    SceKernelUtilsSha1Context ctx;
    sceKernelUtilsSha1BlockInit(&ctx);
+#endif
 
    bool contains_intr = false;
 
    for (uint32_t has_ended = 0; has_ended == 0; opnum++, pc += isize)
    {
+      // Early-termination: if a compiled block already starts at this PC (and we
+      // have at least one instruction in the current block), stop here and reuse
+      // the existing compiled block instead of re-emitting its instructions.
+      if (opnum > 0 && my_config.exp_early_term) {
+         uintptr_t existing = JIT_COMPILED_FUNC(pc, PROCNUM);
+         if (existing) {
+            currentBlock.early_exit_compiled_target = existing;
+            break;
+         }
+      }
 
       uint32_t op = _MMU_read32<PROCNUM, MMU_AT_CODE>(pc & imask);
 
@@ -2459,7 +2541,9 @@ void build_ArmBasicblock(uint16_t max_opcodes = 128, bool include_branches = fal
             contains_intr = true;
       }
 
+#if defined(JIT_BUILD_HASH) || defined(save_hash)
       sceKernelUtilsSha1BlockUpdate(&ctx, (u8 *)&op, 4);
+#endif
 
       if (has_ended && (!instr_does_prefetch(op) || res == INTERPRET)) // prefetch next instruction
          currentBlock.manualPrefetch = true;
@@ -2468,17 +2552,16 @@ void build_ArmBasicblock(uint16_t max_opcodes = 128, bool include_branches = fal
          interpreted_cycles += op_decode[PROCNUM][false](); // + instr_cycles(op);
    }
 
+#if defined(JIT_BUILD_HASH) || defined(save_hash)
    sceKernelUtilsSha1BlockResult(&ctx, (u8 *)digest);
-
    sprintf(currentBlock.block_hash, ">:1:%02X:%08X:%08X:%08X:%08X:%08X", opnum, digest[0], digest[1], digest[2], digest[3], digest[4]);
-
 // #define save_hash
 #ifdef save_hash
    extern void WriteHash(char *msg);
    if (!contains_intr)
       WriteHash(currentBlock.block_hash);
 #endif
-   // printf("Block hash: %s\n", currentBlock.block_hash);
+#endif // JIT_BUILD_HASH || save_hash
 }
 
 template <int PROCNUM>
@@ -2490,6 +2573,14 @@ void build_ThumbBasicblock()
 
    for (uint32_t i = 0, has_ended = 0; has_ended == 0; i++, pc += isize)
    {
+      // Early-termination: reuse an already-compiled block at this PC.
+      if (i > 0 && my_config.exp_early_term) {
+         uintptr_t existing = JIT_COMPILED_FUNC(pc, PROCNUM);
+         if (existing) {
+            currentBlock.early_exit_compiled_target = existing;
+            break;
+         }
+      }
 
       uint32_t op = _MMU_read16<PROCNUM, MMU_AT_CODE>(pc & imask);
 
@@ -2771,6 +2862,7 @@ u32 arm_jit_compile()
       // return op_decode[PROCNUM][thumb]();
    }
 
+#ifdef JIT_PROFILE_ITP
    {
       static uint32_t total_ops = 0, total_itp = 0, total_blocks = 0;
       static uint32_t itp_hist[256] = {};
@@ -2786,13 +2878,13 @@ u32 arm_jit_compile()
          printf("blocks=%u ops=%u itp=%u (%u%%)\n",
                 total_blocks, total_ops, total_itp,
                 total_ops ? (total_itp * 100u / total_ops) : 0u);
-         // top-10 hottest OP_ITP instruction groups
          uint8_t order[256]; for (int j=0;j<256;j++) order[j]=j;
          for (int a=0;a<10;a++) for (int b=a+1;b<256;b++) if (itp_hist[order[b]]>itp_hist[order[a]]) { uint8_t t=order[a]; order[a]=order[b]; order[b]=t; }
          for (int j=0;j<10&&itp_hist[order[j]]>0;j++)
             printf("  itp[%02x] = %u\n", order[j], itp_hist[order[j]]);
       }
    }
+#endif // JIT_PROFILE_ITP
 
    compile_basicblock<PROCNUM>();
    // Return the number of cycles a bit higher than the interpreted cycles

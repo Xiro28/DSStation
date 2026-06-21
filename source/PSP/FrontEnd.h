@@ -29,6 +29,8 @@ public:
 	bool exp_idle_loop;     // skip detected idle loops (runtime)
 	bool exp_block_link;    // inline direct block-to-block dispatch (runtime)
 	bool exp_cycles_reg;    // cycle accumulator in a register (compile-time: JIT_CYCLES_IN_REG)
+	bool exp_icache_align;  // align each compiled block to a 64-byte ICache line start
+	bool exp_early_term;    // stop block early when suffix is already compiled; jump into it
 };
 
 typedef struct configparm {

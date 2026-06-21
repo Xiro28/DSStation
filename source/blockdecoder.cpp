@@ -133,12 +133,19 @@ std::function<void(psp_gpr_t src, psp_gpr_t dst, opcode &op)> arm_preop[] = {
     [](psp_gpr_t src, psp_gpr_t dst, opcode &op) -> void { // PRE_OP_ROR_IMM
         if (op.imm == 0)
         {
-            // RRX: dst = (C << 31) | (src >> 1). Read the carry straight from the
-            // CPSR byte in the CPU struct so we don't depend on psp_gp having
-            // been loaded (non-S/unconditional ALU ops don't load flags).
+            // RRX: dst = (C << 31) | (src >> 1).
             emit_srl(dst, src, 1);
-            emit_lbu(psp_t1, RCPU, _flags + 3);       // CPSR top byte (NZCV at 7..4)
-            emit_ext(psp_t1, psp_t1, _flag_C8, _flag_C8);  // isolate C (bit 5)
+#ifdef JIT_OPT_RRX_GP
+            if (flag_loaded) {
+                // Carry already in psp_gp — skip the lbu CPSR reload.
+                emit_ext(psp_t1, psp_gp, _flag_C8, _flag_C8);
+            } else {
+#endif
+            emit_lbu(psp_t1, RCPU, _flags + 3);           // CPSR top byte (NZCV at 7..4)
+            emit_ext(psp_t1, psp_t1, _flag_C8, _flag_C8); // isolate C
+#ifdef JIT_OPT_RRX_GP
+            }
+#endif
             emit_ins(dst, psp_t1, 31, 1);              // insert 1 bit at position 31
             return;
         }
@@ -1296,89 +1303,123 @@ void emitARMOP(opcode &op, const bool last_op)
 
     case OP_MUL:
     {
+#ifdef JIT_OPT_PREDICATE_MUL
+        // Always use movz/movn commit for conditional MUL — no branch needed.
+        int32_t regs[3] = {(int32_t)op.rd, (int32_t)op.rs1, (int32_t)op.rs2};
+        regman.get(3, regs);
+        const psp_gpr_t dst = (op.condition != (uint32_t)(-1)) ? psp_at : (psp_gpr_t)regs[0];
+        conditional_branchless((psp_gpr_t)regs[0], dst, {
+            emit_mult((psp_gpr_t)regs[1], (psp_gpr_t)regs[2]);
+            emit_mflo(dst);
+        });
+        END_OP(regs[0]);
+#else
         int32_t regs[3] = {op.condition != -1 ? op.rd : (op.rd | 0x10), op.rs1, op.rs2};
-
         HANDLE_CONDITIONAL_NR15(
-            {
-                regman.get(3, regs);
-
-                emit_mult(regs[1], regs[2]);
-                emit_mflo(psp_at);
-            },
-            {
-                regman.get(3, regs);
-
-                emit_mult(regs[1], regs[2]);
-                emit_mflo(regs[0]);
-            });
+            { regman.get(3, regs); emit_mult(regs[1], regs[2]); emit_mflo(psp_at); },
+            { regman.get(3, regs); emit_mult(regs[1], regs[2]); emit_mflo(regs[0]); });
+#endif
         break;
     }
 
     case OP_MLA:
     {
+#ifdef JIT_OPT_MULACC
+        // MLA: Rd = Rm*Rs + Rn (mod 2^32). Use madd to save one insn vs mult+mflo+addu.
+        int32_t regs[4] = {(int32_t)op.rd, (int32_t)op.rs1, (int32_t)op.rs2, op.imm};
+        regman.get(4, regs);
+        const psp_gpr_t dst = (op.condition != (uint32_t)(-1)) ? psp_at : (psp_gpr_t)regs[0];
+        conditional_branchless((psp_gpr_t)regs[0], dst, {
+            emit_mtlo((psp_gpr_t)regs[3]);             // seed LO = Rn
+            emit_madd((psp_gpr_t)regs[1], (psp_gpr_t)regs[2]); // LO += Rm*Rs (signed)
+            emit_mflo(dst);                             // dst = (Rn + Rm*Rs) mod 2^32
+        });
+        END_OP(regs[0]);
+#else
         int32_t regs[4] = {op.condition != -1 ? op.rd : (op.rd | 0x10), op.rs1, op.rs2, op.imm};
-
         HANDLE_CONDITIONAL_NR15(
-            {
-                regman.get(4, regs);
-
-                emit_mult(regs[1], regs[2]);
-                emit_mflo(psp_at);
-                emit_addu(psp_at, psp_at, regs[3]);
-            },
-            {
-                regman.get(4, regs);
-
-                emit_mult(regs[1], regs[2]);
-                emit_mflo(psp_at);
-                emit_addu(regs[0], psp_at, regs[3]);
-            });
+            { regman.get(4, regs); emit_mult(regs[1], regs[2]); emit_mflo(psp_at); emit_addu(psp_at, psp_at, regs[3]); },
+            { regman.get(4, regs); emit_mult(regs[1], regs[2]); emit_mflo(psp_at); emit_addu(regs[0], psp_at, regs[3]); });
+#endif
         break;
     }
 
     case OP_UMUL:
     {
-        int32_t regs[4] = {op.condition != -1 ? op.rd : (op.rd | 0x10), op.condition != -1 ? op.rd : (op.rd | 0x10), op.rs1, op.rs2};
+#ifdef JIT_OPT_MULACC
+        // UMULL: {RdHi:RdLo} = Rm * Rs (unsigned 64-bit).
+        // op.rd=RdHi, op.rs1=Rm, op.rs2=Rs, op.imm=RdLo
+        const bool is_cond = (op.condition != (uint32_t)(-1));
+        const int32_t rdhi_idx = (int32_t)op.rd  | (is_cond ? 0 : 0x10);
+        const int32_t rdlo_idx = op.imm           | (is_cond ? 0 : 0x10);
+        int32_t regs[4] = {rdhi_idx, rdlo_idx, (int32_t)op.rs1, (int32_t)op.rs2};
+        regman.get(4, regs);
 
-        HANDLE_CONDITIONAL_NR15(
-            {
-                regman.get(4, regs);
+        emit_multu((psp_gpr_t)regs[2], (psp_gpr_t)regs[3]);
 
-                emit_multu(regs[2], regs[3]);
-                emit_mflo(psp_at);
-                emit_mfhi(regs[1]);
-                END_OP(regs[1]);
-            },
-            {
-                regman.get(4, regs);
-
-                emit_multu(regs[2], regs[3]);
-                emit_mflo(regs[0]);
-                emit_mfhi(regs[1]);
-                END_OP(regs[1]);
-            });
+        if (is_cond) {
+            generate_condition_check(op.condition);
+            emit_mflo(psp_at);
+            emit_mfhi(psp_v0);
+            const bool isMovz = (op.condition < 8) ? (op.condition & 1) : !(op.condition & 1);
+            if (isMovz) {
+                emit_movz((psp_gpr_t)regs[1], psp_at, psp_s4);   // RdLo
+                emit_movz((psp_gpr_t)regs[0], psp_v0, psp_s4);   // RdHi
+            } else {
+                emit_movn((psp_gpr_t)regs[1], psp_at, psp_s4);
+                emit_movn((psp_gpr_t)regs[0], psp_v0, psp_s4);
+            }
+        } else {
+            emit_mflo((psp_gpr_t)regs[1]);   // RdLo = LO
+            emit_mfhi((psp_gpr_t)regs[0]);   // RdHi = HI
+        }
+        if (!op.dead_rd) {
+            regman.mark_dirty((psp_gpr_t)regs[0]);
+            regman.mark_dirty((psp_gpr_t)regs[1]);
+        }
+#else
+        // Without JIT_OPT_MULACC, ARM_OP_UMULL returns INTERPRET so this is dead.
+#endif
         break;
     }
 
     case OP_UMLA:
     {
-        int32_t regs[4] = {op.condition != -1 ? op.rd : (op.rd | 0x10), op.rs1, op.rs2, op.imm};
+#ifdef JIT_OPT_MULACC
+        // UMLAL: {RdHi:RdLo} += Rm * Rs (unsigned 64-bit accumulate).
+        // op.rd=RdHi, op.rs1=Rm, op.rs2=Rs, op.imm=RdLo
+        // Read current RdLo/RdHi first — do NOT use |0x10 (fresh alloc) since we need their values.
+        const bool is_cond = (op.condition != (uint32_t)(-1));
+        int32_t regs[4] = {(int32_t)op.rd, op.imm, (int32_t)op.rs1, (int32_t)op.rs2};
+        regman.get(4, regs);
 
-        HANDLE_CONDITIONAL_NR15(
-            {
-                regman.get(4, regs);
+        emit_mtlo((psp_gpr_t)regs[1]);    // seed LO = current RdLo
+        emit_mthi((psp_gpr_t)regs[0]);    // seed HI = current RdHi
+        emit_maddu((psp_gpr_t)regs[2], (psp_gpr_t)regs[3]); // HI:LO += Rm*Rs (unsigned)
 
-                emit_multu(regs[1], regs[2]);
-                emit_mflo(psp_at);
-                emit_addu(psp_at, psp_at, regs[3]);
-            },
-            {
-                regman.get(4, regs);
-
-                emit_multu(regs[1], regs[2]);
-                emit_mflo(psp_at);
-                emit_addu(regs[0], psp_at, regs[3]);
-            });
+        if (is_cond) {
+            generate_condition_check(op.condition);
+            emit_mflo(psp_at);    // new RdLo
+            emit_mfhi(psp_v0);    // new RdHi
+            const bool isMovz = (op.condition < 8) ? (op.condition & 1) : !(op.condition & 1);
+            if (isMovz) {
+                emit_movz((psp_gpr_t)regs[1], psp_at, psp_s4);
+                emit_movz((psp_gpr_t)regs[0], psp_v0, psp_s4);
+            } else {
+                emit_movn((psp_gpr_t)regs[1], psp_at, psp_s4);
+                emit_movn((psp_gpr_t)regs[0], psp_v0, psp_s4);
+            }
+        } else {
+            emit_mflo((psp_gpr_t)regs[1]);   // RdLo = new LO
+            emit_mfhi((psp_gpr_t)regs[0]);   // RdHi = new HI
+        }
+        if (!op.dead_rd) {
+            regman.mark_dirty((psp_gpr_t)regs[0]);
+            regman.mark_dirty((psp_gpr_t)regs[1]);
+        }
+#else
+        // Without JIT_OPT_MULACC, ARM_OP_UMLAL returns INTERPRET so this is dead.
+#endif
         break;
     }
 
@@ -1394,6 +1435,126 @@ void emitARMOP(opcode &op, const bool last_op)
         });
 
         regman.mark_dirty((psp_gpr_t)regs[0]);
+        break;
+    }
+
+    case OP_QADD:
+    {
+#ifdef JIT_OPT_SATURATE
+        // Rd = SAT_32(Rm + Rn). op.rd=Rd, op.rs1=Rm, op.rs2=Rn
+        int32_t regs[3] = {(int32_t)op.rd, (int32_t)op.rs1, (int32_t)op.rs2};
+        regman.get(3, regs);
+        const psp_gpr_t rm = (psp_gpr_t)regs[1];
+        const psp_gpr_t rn = (psp_gpr_t)regs[2];
+
+        emit_addu(psp_t0, rm, rn);          // t0 = wrapping sum
+        emit_xor(psp_t1, rm, rn);           // t1: bit31=1 if different signs
+        emit_xor(psp_t2, rm, psp_t0);      // t2: bit31=1 if result sign != Rm sign
+        emit_nor(psp_t1, psp_t1, psp_zero); // NOT: bit31=1 if SAME signs
+        emit_and(psp_t1, psp_t1, psp_t2);  // overflow iff same signs AND sign changed
+        emit_sra(psp_v0, rm, 31);           // v0 = 0 (Rm≥0) or -1 (Rm<0)
+        emit_not(psp_v0, psp_v0);           // v0 = -1 (pos) or 0 (neg)
+        emit_lui(psp_v1, 0x8000);           // v1 = 0x80000000 = INT32_MIN
+        emit_xor(psp_v1, psp_v1, psp_v0);  // v1 = INT32_MAX (pos) or INT32_MIN (neg)
+        emit_sra(psp_t1, psp_t1, 31);      // t1 = -1 (overflow) or 0 (no overflow)
+        emit_movn(psp_t0, psp_v1, psp_t1); // if overflow: t0 = saturated value
+
+        if (op.condition != (uint32_t)(-1)) {
+            generate_condition_check(op.condition);
+            const bool isMovz = (op.condition < 8) ? (op.condition & 1) : !(op.condition & 1);
+            if (isMovz) emit_movz((psp_gpr_t)regs[0], psp_t0, psp_s4);
+            else        emit_movn((psp_gpr_t)regs[0], psp_t0, psp_s4);
+        } else {
+            emit_move((psp_gpr_t)regs[0], psp_t0);
+        }
+        END_OP(regs[0]);
+#endif
+        break;
+    }
+
+    case OP_QSUB:
+    {
+#ifdef JIT_OPT_SATURATE
+        // Rd = SAT_32(Rm - Rn). op.rd=Rd, op.rs1=Rm, op.rs2=Rn
+        int32_t regs[3] = {(int32_t)op.rd, (int32_t)op.rs1, (int32_t)op.rs2};
+        regman.get(3, regs);
+        const psp_gpr_t rm = (psp_gpr_t)regs[1];
+        const psp_gpr_t rn = (psp_gpr_t)regs[2];
+
+        emit_subu(psp_t0, rm, rn);          // t0 = wrapping difference
+        emit_xor(psp_t1, rm, rn);           // t1: bit31=1 if different signs
+        emit_xor(psp_t2, rm, psp_t0);      // t2: bit31=1 if result sign != Rm sign
+        emit_and(psp_t1, psp_t1, psp_t2);  // overflow iff diff signs AND sign changed
+        emit_sra(psp_v0, rm, 31);
+        emit_not(psp_v0, psp_v0);
+        emit_lui(psp_v1, 0x8000);
+        emit_xor(psp_v1, psp_v1, psp_v0);
+        emit_sra(psp_t1, psp_t1, 31);
+        emit_movn(psp_t0, psp_v1, psp_t1);
+
+        if (op.condition != (uint32_t)(-1)) {
+            generate_condition_check(op.condition);
+            const bool isMovz = (op.condition < 8) ? (op.condition & 1) : !(op.condition & 1);
+            if (isMovz) emit_movz((psp_gpr_t)regs[0], psp_t0, psp_s4);
+            else        emit_movn((psp_gpr_t)regs[0], psp_t0, psp_s4);
+        } else {
+            emit_move((psp_gpr_t)regs[0], psp_t0);
+        }
+        END_OP(regs[0]);
+#endif
+        break;
+    }
+
+    case OP_SMULXY:
+    {
+#ifdef JIT_OPT_SIGNEDMUL16
+        // Rd = sign16(Rm.x) * sign16(Rs.y). op.imm: bit0=Rm_top, bit1=Rs_top
+        const int rm_top = (int32_t)op.imm & 1;
+        const int rs_top = ((int32_t)op.imm >> 1) & 1;
+        int32_t regs[3] = {(int32_t)op.rd, (int32_t)op.rs1, (int32_t)op.rs2};
+        regman.get(3, regs);
+
+        if (rm_top) emit_sra(psp_v0, (psp_gpr_t)regs[1], 16);
+        else        emit_seh(psp_v0, (psp_gpr_t)regs[1]);
+
+        if (rs_top) emit_sra(psp_v1, (psp_gpr_t)regs[2], 16);
+        else        emit_seh(psp_v1, (psp_gpr_t)regs[2]);
+
+        const psp_gpr_t dst = (op.condition != (uint32_t)(-1)) ? psp_at : (psp_gpr_t)regs[0];
+        conditional_branchless((psp_gpr_t)regs[0], dst, {
+            emit_mult(psp_v0, psp_v1);
+            emit_mflo(dst);
+        });
+        END_OP(regs[0]);
+#endif
+        break;
+    }
+
+    case OP_SMLAXY:
+    {
+#ifdef JIT_OPT_SIGNEDMUL16
+        // Rd = (sign16(Rm.x) * sign16(Rs.y)) + Rn (mod 2^32).
+        // op.imm: [3:0]=Rn_reg, [4]=Rm_top, [5]=Rs_top
+        const int rn_reg = (int32_t)op.imm & 0xF;
+        const int rm_top = ((int32_t)op.imm >> 4) & 1;
+        const int rs_top = ((int32_t)op.imm >> 5) & 1;
+        int32_t regs[4] = {(int32_t)op.rd, (int32_t)op.rs1, (int32_t)op.rs2, rn_reg};
+        regman.get(4, regs);
+
+        if (rm_top) emit_sra(psp_v0, (psp_gpr_t)regs[1], 16);
+        else        emit_seh(psp_v0, (psp_gpr_t)regs[1]);
+
+        if (rs_top) emit_sra(psp_v1, (psp_gpr_t)regs[2], 16);
+        else        emit_seh(psp_v1, (psp_gpr_t)regs[2]);
+
+        const psp_gpr_t dst = (op.condition != (uint32_t)(-1)) ? psp_at : (psp_gpr_t)regs[0];
+        conditional_branchless((psp_gpr_t)regs[0], dst, {
+            emit_mtlo((psp_gpr_t)regs[3]);   // seed LO = Rn
+            emit_madd(psp_v0, psp_v1);        // LO += Rm.x * Rs.y (signed)
+            emit_mflo(dst);
+        });
+        END_OP(regs[0]);
+#endif
         break;
     }
 
@@ -1638,11 +1799,65 @@ void emitARMOP(opcode &op, const bool last_op)
                         emit_ins(psp_a0, psp_zero, 0, 0);
                     }
                 } else {
-                    /* if (op.extra_flags & EXTFL_DIRECTMEMACCESS){
-                         u32 op = emit_SlideDelay();
-                         emit_jal(_write32);
-                         emit_Write32(op);
-                     }else*/
+                    if (jit_opt_fastmem && PROCNUM == ARMCPU_ARM9)
+                    {
+                        // Inline fastmem path for word STR to ARM9 main RAM.
+                        // Mirrors the OP_LDR fastmem path but also invalidates the
+                        // JIT block-cache entries for the written word (required for
+                        // self-modifying code correctness).
+                        // a0 = effective address (not yet aligned), a1 = value to store.
+                        // Scratch: t1, t2, v0.  Layout (27 insns):
+                        //   0–5  : DTCM check -> SLOW
+                        //   6–10 : main-RAM check (addr>>24 == 0x02) -> SLOW
+                        //   11–13: word-align offset in t2 = addr & 0x3FFFFC
+                        //   14–19: JIT invalidation (clear two uintptr_t slots)
+                        //   20–24: direct store to MAIN_MEM (store in delay slot)
+                        //   25–26: SLOW: jal _write32 + align delay slot
+                        //   27   : DONE
+                        const u32 dtcmRegAddr = (u32)&MMU.DTCMRegion;
+                        const u32 mainMemBase = (u32)MMU.MAIN_MEM;
+                        const u32 jitBase     = (u32)&JIT.MAIN_MEM[0];
+                        const u32 dtcmHi = ((dtcmRegAddr + 0x8000) >> 16) & 0xFFFF;
+                        const u32 dtcmLo = (u32)(s16)dtcmRegAddr;
+                        const u32 mmHi   = ((mainMemBase + 0x8000) >> 16) & 0xFFFF;
+                        const u32 mmLo   = (u32)(s16)mainMemBase;
+                        const u32 jitHi  = ((jitBase + 0x8000) >> 16) & 0xFFFF;
+                        const u32 jitLo  = (u32)(s16)jitBase;
+                        const u32 fmBase = (u32)emit_GetPtr();
+                        const u32 SLOW   = fmBase + 25 * 4;
+                        const u32 DONE   = fmBase + 27 * 4;
+
+                        emit_srl(psp_t2, psp_a0, 14);          // 0
+                        emit_sll(psp_t2, psp_t2, 14);          // 1: t2 = addr & ~0x3FFF
+                        emit_lui(psp_t1, dtcmHi);              // 2
+                        emit_lw(psp_t1, psp_t1, dtcmLo);      // 3: t1 = DTCMRegion
+                        emit_beq(psp_t2, psp_t1, SLOW);       // 4: DTCM -> slow
+                        emit_nop();                             // 5
+                        emit_srl(psp_t2, psp_a0, 24);          // 6
+                        emit_andi(psp_t2, psp_t2, 0x0F);       // 7
+                        emit_movi(psp_t1, 0x02);                // 8
+                        emit_bne(psp_t2, psp_t1, SLOW);       // 9: not main RAM -> slow
+                        emit_nop();                             // 10
+                        emit_sll(psp_t2, psp_a0, 10);          // 11
+                        emit_srl(psp_t2, psp_t2, 10);          // 12: t2 = addr & 0x3FFFFF
+                        emit_ins(psp_t2, psp_zero, 1, 0);      // 13: t2 = addr & 0x3FFFFC
+                        emit_sll(psp_v0, psp_t2, 1);           // 14: v0 = JIT byte offset
+                        emit_lui(psp_t1, jitHi);               // 15
+                        emit_addiu(psp_t1, psp_t1, jitLo);    // 16: t1 = &JIT.MAIN_MEM[0]
+                        emit_addu(psp_t1, psp_t1, psp_v0);    // 17
+                        emit_sw(psp_zero, psp_t1, 0);          // 18: clear ARM9 JIT slot
+                        emit_sw(psp_zero, psp_t1, 4);          // 19: clear ARM7 JIT slot
+                        emit_lui(psp_t1, mmHi);                // 20
+                        emit_addiu(psp_t1, psp_t1, mmLo);     // 21: t1 = MAIN_MEM base
+                        emit_addu(psp_t1, psp_t1, psp_t2);    // 22
+                        emit_beq(psp_zero, psp_zero, DONE);   // 23: -> DONE
+                        emit_sw(psp_a1, psp_t1, 0);           // 24: delay slot: store word
+                        // SLOW (25):
+                        emit_jal(_write32);                    // 25
+                        emit_ins(psp_a0, psp_zero, 1, 0);     // 26: delay slot: align a0
+                        // DONE (27):
+                    }
+                    else
                     {
                         emit_jal(_write32);
                         emit_ins(psp_a0, psp_zero, 1, 0);
@@ -2224,7 +2439,7 @@ bool block::emitThumbBlock()
 
     load_flags();
 
-    for (opcode op : opcodes)
+    for (opcode &op : opcodes)
     {
 
         const u8 isize = 2;
@@ -2295,7 +2510,7 @@ bool block::emitArmBlock()
     regman.reset();
 
     const u8 isize = 4;
-    for (opcode op : opcodes)
+    for (opcode &op : opcodes)
     {
         if ((op._op == OP_ITP || op._op == OP_SWI))
         {

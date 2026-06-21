@@ -15,6 +15,13 @@
 // keep AOT_VERSION in sync (the emitted dispatch code changes).
 #define JIT_CYCLES_IN_REG 1
 
+// JIT optimization feature flags — comment out to disable an optimization.
+#define JIT_OPT_MULACC       // MLA→madd, UMULL→multu+mflo/mfhi, UMLAL→maddu (64-bit accurate)
+#define JIT_OPT_RRX_GP       // RRX: skip lbu CPSR reload when carry is already in psp_gp
+#define JIT_OPT_SATURATE     // QADD/QSUB via branchless saturation (was always INTERPRET)
+#define JIT_OPT_SIGNEDMUL16  // SMULxy/SMLAxy via seh/sra+mult/madd (was always INTERPRET)
+#define JIT_OPT_PREDICATE_MUL // MUL/MLA conditional path always via movz/movn (no branch)
+
 #define RCPU   psp_k0
 #if JIT_CYCLES_IN_REG
 #define RCYC   psp_s3
@@ -132,6 +139,10 @@ enum op{
     OP_MLA,
     OP_UMLA,
     OP_CLZ,
+    OP_QADD,    // SAT_32(Rm + Rn); op.rd=Rd, op.rs1=Rm, op.rs2=Rn
+    OP_QSUB,    // SAT_32(Rm - Rn); op.rd=Rd, op.rs1=Rm, op.rs2=Rn
+    OP_SMULXY,  // sign16(Rm.x)*sign16(Rs.y); op.imm: bit0=Rm_top bit1=Rs_top
+    OP_SMLAXY,  // Rd=(Rm.x*Rs.y)+Rn; op.imm: [3:0]=Rn_reg [4]=Rm_top [5]=Rs_top
     OP_RSB,
     OP_ADC,
     OP_SBC,
@@ -326,17 +337,15 @@ class block{
             containsITP = containsITP || (_op == OP_ITP);
 
             if (_op == OP_ITP) return;
-            
-            onlyITP = false;
 
-            if (rd  < 16 && rd  >= 0) reg_usage_end[rd  + 1] = pc;
-            if (rs1 < 16 && rs1 >= 0) reg_usage_end[rs1 + 1] = pc;
-            if (rs2 < 16 && rs2 >= 0) reg_usage_end[rs2 + 1] = pc;
+            onlyITP = false;
         }
 
         void clearBlock(){
 
+#if defined(JIT_BUILD_HASH) || defined(save_hash)
             block_hash[0] = '\0';
+#endif
 
             idleLoop = false;
             onlyITP = true;
@@ -347,20 +356,15 @@ class block{
             JumpOP = false;
             MCROP = false;
             jumped = false;
-            
+
             manualPrefetch = false;
             containsITP = false;
+            early_exit_compiled_target = 0;
 
             branch_addr = 0;
             start_addr = 0;
-            
-            for (int i = 0; i < 16; ++i){
-                reg_usage_end[i + 1] = 0;
-            }
 
             if (opcodes.size() > 0) opcodes.clear();
-
-            memset(opcodes.data(), 0, opcodes.size());
         }
 
         u32 getNOpcodes() { return opcodes.size(); }
@@ -388,16 +392,22 @@ class block{
         bool idleLoop = false;
         bool jumped = false;
 
+        // Early-termination: set during block building when the current PC already
+        // has a compiled block. The epilogue jumps directly to that block instead of
+        // re-emitting its instructions. Zero means no early exit.
+        uintptr_t early_exit_compiled_target = 0;
+
         u32 branch_addr = 0;
         u32 start_addr = 0;
 
+#if defined(JIT_BUILD_HASH) || defined(save_hash)
         char block_hash[1024];
+#endif
         std::vector<opcode> opcodes;
 
     private:
         uint32 startAddr;
         uint32 endAddr;
-        uint32_t reg_usage_end[17] {0}; //-1 register are stored in 0 so the actual registers start at 1
         uint32 getStartAddr();
         uint32 getEndAddr();
         void addOpcode(opcode op);

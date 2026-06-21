@@ -7,3 +7,4 @@
 *.dsv
 *.nds
 /build/desmumewin
+*.DS_Store

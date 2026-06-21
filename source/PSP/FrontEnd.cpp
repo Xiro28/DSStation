@@ -133,9 +133,11 @@ void InitMainSettings(configured_features *params)
 	// Experimental JIT flags default ON, so boot paths that never open the
 	// Experimental tab still get the optimizations. (InitExperimentalSettings
 	// overrides from expSettings[] when the menu/per-ROM config is loaded.)
-	params->exp_idle_loop  = true;
-	params->exp_block_link = true;
-	params->exp_cycles_reg = g_jit_cycles_in_reg;
+	params->exp_idle_loop   = true;
+	params->exp_block_link  = true;
+	params->exp_cycles_reg  = g_jit_cycles_in_reg;
+	params->exp_icache_align = true;
+	params->exp_early_term  = true;
 }
 
 void FinalizeMainSettings(configured_features *params)
@@ -174,6 +176,12 @@ void InitExperimentalSettings(configured_features *params)
 	c = addSetting(expSettings, c, "Thumb Flag Elim", "Drop dead flag computations in Thumb blocks. Disable to debug.", 1);
 	c = addSetting(expSettings, c, "Fast Memory", "Inline main-RAM word loads (skip the MMU C call). VERIFY with difftest; default off.", 0);
 
+	c = addSetting(expSettings, c, "ICache Align", "Align each compiled block to a 64-byte ICache line. Reduces cache-line splits on the PSP Allegrex (16KB 2-way ICache).", 1);
+	params->exp_icache_align = expSettings[7].value;
+
+	c = addSetting(expSettings, c, "Suffix Reuse", "Stop block early when the remaining instructions are already compiled; jump into that block. Reduces code-cache usage and recompilation.", 1);
+	params->exp_early_term = expSettings[8].value;
+
 	totalExp = c;
 
 	jit_opt_constprop  = expSettings[3].value;
@@ -184,9 +192,11 @@ void InitExperimentalSettings(configured_features *params)
 
 void FinalizeExperimental(configured_features *params)
 {
-	params->exp_idle_loop  = expSettings[0].value;
-	params->exp_block_link = expSettings[1].value;
-	params->exp_cycles_reg = expSettings[2].value;
+	params->exp_idle_loop   = expSettings[0].value;
+	params->exp_block_link  = expSettings[1].value;
+	params->exp_cycles_reg  = expSettings[2].value;
+	params->exp_icache_align = expSettings[7].value;
+	params->exp_early_term  = expSettings[8].value;
 
 	jit_opt_constprop  = expSettings[3].value;
 	jit_opt_condmerge  = expSettings[4].value;
